@@ -1,0 +1,9 @@
+path: ./yolo_dataset # 資料集根目錄絕對或相對路徑
+train: images/train  # 訓練集圖片路徑
+val: images/val      # 驗證集圖片路徑
+
+# 類別字典 (必須從 0 開始排)
+names:
+  0: blood_vessel
+  1: glomerulus
+  2: unsure
