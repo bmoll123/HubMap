@@ -1,6 +1,10 @@
 data/
 work_dirs/
 other/
+yolo_dataset/
+runs/
+
+*.pt 
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

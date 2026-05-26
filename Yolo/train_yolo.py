@@ -1,35 +1,85 @@
+import os
+import shutil
 from ultralytics import YOLO
 
+# 建立全局變數用來追蹤微血管的最高分數
+BEST_VESSEL_MAP = 0.0
+
+def on_fit_epoch_end(trainer):
+    """
+    自訂鉤子 (Hook)：在每一輪 (Epoch) 結束時強制觸發
+    """
+    global BEST_VESSEL_MAP
+    
+    # 確保當前有驗證集的分數數據
+    if trainer.metrics and hasattr(trainer.metrics, 'keys'):
+        # 取得這一輪所有類別的詳細評估指標
+        metrics = trainer.validator.metrics
+        
+        print("\n================== 📊 每一類詳細 mAP 數據 ==================")
+        # 類別順序：0: blood_vessel, 1: glomerulus, 2: unsure
+        class_names = ['blood_vessel', 'glomerulus', 'unsure']
+        
+        # 1. 強制印出每一類的 Bbox mAP50-95
+        try:
+            bbox_maps = metrics.box.all_ap  # 取得所有類別在各個變形下的 AP 矩陣
+            # 這裡計算各類別平均 IoU (0.50:0.95) 的 AP
+            for i, name in enumerate(class_names):
+                if i < len(bbox_maps):
+                    c_map = bbox_maps[i].mean()
+                    print(f"  [{name}] -> Box mAP50-95: {c_map:.4f}")
+        except Exception:
+            print("  無法獲取多類別詳細 Box 數據 (模型可能尚未收斂生成預測)")
+
+        # 2. 獨立監控第一類 [0] blood_vessel 的 Mask mAP50-95 分數
+        try:
+            # 醫學比賽中一般以實例分割的 Seg 指標為主
+            vessel_seg_map = metrics.seg.all_ap[0].mean() 
+            print(f"🌟 核心監控 -> [blood_vessel] 當前 Mask mAP: {vessel_seg_map:.4f}")
+            
+            # 如果這一輪的 blood_vessel 分數比歷史紀錄好，就強行複製當前權重為專屬的最佳模型
+            if vessel_seg_map > BEST_VESSEL_MAP:
+                BEST_VESSEL_MAP = vessel_seg_map
+                current_epoch_weight = os.path.join(trainer.save_dir, 'weights', 'last.pt')
+                target_best_weight = os.path.join(trainer.save_dir, 'weights', 'best_blood_vessel.pt')
+                
+                if os.path.exists(current_epoch_weight):
+                    shutil.copy(current_epoch_weight, target_best_weight)
+                    print(f"🔥 檢測到更好的 blood_vessel 模型！已獨立保存至: {target_best_weight}")
+        except Exception:
+            pass
+        print("========================================================\n")
 
 def main():
-    # 1. 載入預訓練的實例分割模型 (這裡用大型的 yolo11x-seg 或 yolov8x-seg，對標你之前的 RTMDet-x)
-    # 你也可以選中型的 yolo11m-seg 來加快速度
+    # 1. 載入預訓練模型
     model = YOLO("yolo11x-seg.pt")
 
-    # 2. 開始訓練
-    results = model.train(
-        data="hubmap.yaml",  # 剛才設定的 yaml 檔
-        epochs=100,  # 訓練輪数
-        imgsz=768,  # 複製金牌得主的智慧：將輸入解析度放大到 768
-        batch=8,  # 根據你的顯卡 VRAM 調整
-        device=0,  # 使用 GPU 0
+    # 2. 註冊我們的客製化回呼函數
+    model.add_callback("on_fit_epoch_end", on_fit_epoch_end)
+
+    # 3. 開始正式訓練
+    model.train(
+        data="hubmap.yaml",  
+        epochs=100,  
+        imgsz=768,  
+        batch=8,  
+        device=0,  
         workers=4,
         save=True,
         project="hubmap_yolo",
-        name="rtmdet_vs_yolo",
-        # 融合金牌策略：開啟 YOLO 內建的強大幾何增強與高階設定
-        degrees=180.0,  # 隨機旋轉 -180~180 度 (金牌強推)
-        scale=0.5,  # 縮放增強
-        fliplr=0.5,  # 水平翻轉
-        mosaic=1.0,  # 開啟馬賽克增強
-        val=True,  # 訓練時同步進行驗證
+        name="rtmdet_vs_yolo_fixed",
+        val=True,  
+        verbose=True,  # 確保印出詳細類別資訊
+
+        # 金牌幾何增強配方
+        degrees=180.0,   
+        scale=0.9,       
+        translate=0.3,   
+        fliplr=0.5,      
+        flipud=0.5,      
+        mosaic=1.0,      
+        mixup=0.1,       
     )
-
-    # 3. 訓練完成後，可以用指標直接評估驗證集
-    metrics = model.val()
-    print(f"Bbox mAP50-95: {metrics.box.map}")
-    print(f"Mask mAP50-95: {metrics.seg.map}")
-
 
 if __name__ == "__main__":
     main()

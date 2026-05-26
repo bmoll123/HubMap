@@ -6,7 +6,7 @@ import pycocotools.mask as mask_utils
 import mmengine
 from sklearn.model_selection import StratifiedKFold
 
-DATA_ROOT = "../data/train"
+DATA_ROOT = "../../data/train"
 
 
 def load_annotations(ann_file):
@@ -93,14 +93,14 @@ def df2coco(df, annotations):
     return coco
 
 
-annotations = load_annotations("../data/polygons.jsonl")
-df = pd.read_csv("../data/tile_meta.csv")
+annotations = load_annotations("../../data/polygons.jsonl")
+df = pd.read_csv("../../data/tile_meta.csv")
 wsi1ds1 = df.query("(dataset == 1) and (source_wsi == 1)")
 wsi2ds1 = df.query("(dataset == 1) and (source_wsi == 2)")
 
 # all
 trainval = pd.concat([wsi1ds1, wsi2ds1], axis=0)
-mmengine.dump(df2coco(trainval, annotations), f"../data/dtrainval.json")
+mmengine.dump(df2coco(trainval, annotations), f"../../data/dtrainval.json")
 
 # split by i
 val0 = pd.concat(
@@ -118,8 +118,8 @@ train0 = pd.concat(
     axis=0,
 )
 
-mmengine.dump(df2coco(train0, annotations), f"../data/dtrain0i.json")
-mmengine.dump(df2coco(val0, annotations), f"../data/dval0i.json")
+mmengine.dump(df2coco(train0, annotations), f"../../data/dtrain0i.json")
+mmengine.dump(df2coco(val0, annotations), f"../../data/dval0i.json")
 
 
 # split by i
@@ -138,9 +138,9 @@ train1 = pd.concat(
     axis=0,
 )
 
-mmengine.dump(df2coco(train1, annotations), f"../data/dtrain1i.json")
-mmengine.dump(df2coco(val1, annotations), f"../data/dval1i.json")
+mmengine.dump(df2coco(train1, annotations), f"../../data/dtrain1i.json")
+mmengine.dump(df2coco(val1, annotations), f"../../data/dval1i.json")
 
 df3 = df.query("(dataset == 2)")
 coco3 = df2coco(df3, annotations)
-mmengine.dump(coco3, "../data/dtrain_dataset2.json")
+mmengine.dump(coco3, "../../data/dtrain_dataset2.json")
