@@ -100,35 +100,19 @@ model = dict(
 )
 
 # =========================================================================
-# 資料集與訓練排程設定 (完全繼承前人通過初篩的資料路徑與幾何增強配方)
+# 🎯 Kaggle 離線提交專用：資料集與測試載入器配置（徹底對齊 m0i.py 智慧）
 # =========================================================================
 dataset_type = "CocoDataset"
-data_root = "../data/"
-img_prefix = "../data/train"
+# 1. 將資料根目錄改為工作區，這也是我們剛剛生成假 dval0i.json 的地方
+data_root = "/kaggle/working/"
+# 2. 🟢 關鍵修正：將測試圖片路徑精確指向 Kaggle 官方的真實離線測試集影像資料夾
+img_prefix = "/kaggle/input/hubmap-hacking-the-human-vasculature/test/"
 metainfo = dict(classes=("blood_vessel", "glomerulus", "unsure"))
 backend_args = None
 
 img_scale = (768, 768)
-train_pipeline = [
-    dict(type="LoadImageFromFile", backend_args=backend_args),
-    dict(type="LoadAnnotations", with_bbox=True, with_mask=True),
-    dict(type="Resize", scale=(512, 512), keep_ratio=True),
-    dict(type="YOLOXHSVRandomAug"),
-    dict(
-        type="RandomRotateScaleCrop",
-        img_scale=img_scale,
-        angle_range=(-180, 180),
-        scale_range=(0.1, 2.0),
-        border_value=(114, 114, 114),
-        rotate_prob=0.5,
-        scale_prob=1.0,
-        hflip_prob=0.5,
-        rot90_prob=1.0,
-        mask_dtype="u1",
-    ),
-    dict(type="CropGtMasks", roi_size=56),
-    dict(type="PackDetInputs"),
-]
+
+# 測試集的資料增強流水線（維持你的 768x768 縮放比例）
 test_pipeline = [
     dict(type="LoadImageFromFile", backend_args=backend_args),
     dict(type="Resize", scale=img_scale, keep_ratio=True),
@@ -138,34 +122,9 @@ test_pipeline = [
         meta_keys=("img_id", "img_path", "ori_shape", "img_shape", "scale_factor"),
     ),
 ]
-train_dataset1 = dict(
-    type=dataset_type,
-    data_root=data_root,
-    ann_file="dtrain0i.json",
-    data_prefix=dict(img=img_prefix),
-    metainfo=metainfo,
-    filter_cfg=dict(filter_empty_gt=True, min_size=32),
-    pipeline=train_pipeline,
-    backend_args=backend_args,
-)
-train_dataset2 = dict(
-    type=dataset_type,
-    data_root=data_root,
-    ann_file="dtrain_dataset2_dropdup.json",
-    data_prefix=dict(img=img_prefix),
-    metainfo=metainfo,
-    filter_cfg=dict(filter_empty_gt=True, min_size=32),
-    pipeline=train_pipeline,
-    backend_args=backend_args,
-)
-train_dataloader = dict(
-    batch_size=4,
-    num_workers=4,
-    persistent_workers=True,
-    sampler=dict(type="GroupMultiSourceSampler", batch_size=4, source_ratio=[1, 3]),
-    dataset=dict(type="ConcatDataset", datasets=[train_dataset1, train_dataset2]),
-)
-val_dataloader = dict(
+
+# 3. 🌟 徹底解耦！重寫專屬於測試的 test_dataloader，不再借用 val_dataloader
+test_dataloader = dict(
     batch_size=1,
     num_workers=2,
     persistent_workers=True,
@@ -174,41 +133,36 @@ val_dataloader = dict(
     dataset=dict(
         type=dataset_type,
         data_root=data_root,
-        ann_file="dval0i.json",
-        data_prefix=dict(img=img_prefix),
+        ann_file="data/dval0i.json",  # 指向我們在 /kaggle/working/data/ 下建立的假標籤
+        data_prefix=dict(img=img_prefix),  # 完美指向 /kaggle/input/.../test/
         metainfo=metainfo,
         test_mode=True,
         pipeline=test_pipeline,
         backend_args=backend_args,
     ),
 )
-test_dataloader = val_dataloader
 
-val_evaluator = [
+# 4. 評估器對齊修正
+test_evaluator = [
     dict(
         type="FastCocoMetric",
-        ann_file=data_root + val_dataloader["dataset"]["ann_file"],
+        ann_file=test_dataloader["dataset"]["data_root"]
+        + test_dataloader["dataset"]["ann_file"],
         metric=["bbox", "segm"],
         classwise=True,
         format_only=False,
         backend_args=backend_args,
     ),
 ]
-test_evaluator = val_evaluator
 
-imgs_per_epoch = 338
-iters_per_epoch = imgs_per_epoch // 3
-train_cfg = dict(
-    type="IterBasedTrainLoop",
-    max_iters=200 * iters_per_epoch,
-    val_interval=iters_per_epoch * 9,
-)
+# --- 以下為系統排程與迴圈設定，維持不變 ---
+train_cfg = dict(type="IterBasedTrainLoop", max_iters=22400, val_interval=1008)
 val_cfg = dict(type="MultiEMAValLoop")
 test_cfg = dict(type="TestLoop")
 
 optim_wrapper = dict(
     type="AmpOptimWrapper",
-    dtype="float16",  # 🚨 關鍵修正：退回 float16 以完整支援所有插值算子
+    dtype="float16",
     optimizer=dict(type="AdamW", lr=5e-4, weight_decay=0.01),
     paramwise_cfg=dict(norm_decay_mult=0, bias_decay_mult=0, bypass_duplicate=True),
 )
@@ -224,10 +178,7 @@ default_hooks = dict(
     logger=dict(type="LoggerHook", interval=50),
     param_scheduler=dict(type="ParamSchedulerHook"),
     checkpoint=dict(
-        type="CheckpointHook",
-        by_epoch=False,
-        interval=train_cfg["val_interval"],
-        save_optimizer=False,
+        type="CheckpointHook", by_epoch=False, interval=1008, save_optimizer=False
     ),
     sampler_seed=dict(type="DistSamplerSeedHook"),
     visualization=dict(type="DetVisualizationHook"),
@@ -247,7 +198,7 @@ log_processor = dict(type="LogProcessor", window_size=50, by_epoch=False)
 log_level = "INFO"
 resume = False
 
-# 🚨 模組動態綁定核心
+# 5. 🚨 確保這裡寫的是你 Dataset 上傳時的正確名稱（如果是 hubmap_modules 就要寫對）
 custom_imports = dict(
-    imports=["hubmap_modules", "mmpretrain.models"], allow_failed_imports=False
+    imports=["custom_modules", "mmpretrain.models"], allow_failed_imports=False
 )
