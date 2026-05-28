@@ -89,7 +89,7 @@ model = dict(
                     target_stds=[0.1, 0.1, 0.2, 0.2]),
                 reg_class_agnostic=True,
                 reg_decoded_bbox=True,
-                norm_cfg=dict(type='SyncBN', requires_grad=True),
+                norm_cfg=dict(type='GN', num_groups=32, requires_grad=True),
                 loss_cls=dict(
                     type='CrossEntropyLoss',
                     use_sigmoid=False,
@@ -107,7 +107,7 @@ model = dict(
                     target_stds=[0.05, 0.05, 0.1, 0.1]),
                 reg_class_agnostic=True,
                 reg_decoded_bbox=True,
-                norm_cfg=dict(type='SyncBN', requires_grad=True),
+                norm_cfg=dict(type='GN', num_groups=32, requires_grad=True),
                 loss_cls=dict(
                     type='CrossEntropyLoss',
                     use_sigmoid=False,
@@ -125,7 +125,7 @@ model = dict(
                     target_stds=[0.033, 0.033, 0.067, 0.067]),
                 reg_class_agnostic=True,
                 reg_decoded_bbox=True,
-                norm_cfg=dict(type='SyncBN', requires_grad=True),
+                norm_cfg=dict(type='GN', num_groups=32, requires_grad=True),
                 loss_cls=dict(
                     type='CrossEntropyLoss',
                     use_sigmoid=False,
@@ -244,13 +244,19 @@ model = dict(
             min_bbox_size=0),
         rcnn=dict(
             score_thr=0.001,
-            nms=dict(type='soft_nms', iou_threshold=0.5),
-            max_per_img=100,
+            # [FIX] soft_nms iou_threshold 0.5 -> 0.4，降低對密集血管的壓制
+            nms=dict(type='soft_nms', iou_threshold=0.4),
+            # [FIX] max_per_img 100 -> 200，避免 dense tile 截斷
+            max_per_img=200,
             mask_thr_binary=0.5)))
-data_root = ''
+
+data_root = '/home/cvml-3/yy/114_2/HubMap/HubMap-2023-3rd-Place-Solution/hubmap-hacking-the-human-vasculature'
 metainfo = dict(classes=('blood_vessel', ), palette=[(220, 20, 60)])
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
+img_size = 1400
+
+# [FIX] 加入 stain augmentation 到 Stage 2 的 Albu transforms
 albu_train_transforms = [
     dict(
         type='ShiftScaleRotate',
@@ -258,9 +264,14 @@ albu_train_transforms = [
         scale_limit=0.15,
         rotate_limit=15,
         p=0.4),
-    dict(type='RandomRotate90', p=0.4)
+    dict(type='RandomRotate90', p=0.4),
+    # [FIX] stain augmentation
+    dict(type='HueSaturationValue',
+         hue_shift_limit=15, sat_shift_limit=25, val_shift_limit=15, p=0.4),
+    dict(type='CLAHE', clip_limit=3.0, tile_grid_size=(8, 8), p=0.3),
+    dict(type='GaussianBlur', blur_limit=(3, 5), p=0.2),
 ]
-img_size = 1400
+
 train_pipeline = [
     dict(type='LoadImageFromFile'),
     dict(type='LoadAnnotations', with_bbox=True, with_mask=True),
@@ -321,15 +332,7 @@ train_pipeline = [
                   }]]),
     dict(
         type='Albu',
-        transforms=[
-            dict(
-                type='ShiftScaleRotate',
-                shift_limit=0.0625,
-                scale_limit=0.15,
-                rotate_limit=15,
-                p=0.4),
-            dict(type='RandomRotate90', p=0.4)
-        ],
+        transforms=albu_train_transforms,
         bbox_params=dict(
             type='BboxParams',
             format='pascal_voc',
@@ -369,12 +372,13 @@ test_pipeline = [
         ])
 ]
 data = dict(
-    samples_per_gpu=2,
-    workers_per_gpu=4,
+    samples_per_gpu=1,
+    workers_per_gpu=2,
     pin_memory=True,
     drop_last=False,
     train=dict(
         type='CocoDataset',
+        data_root=data_root,
         classes=('blood_vessels', ),
         ann_file='coco_data/coco/ds1_coco_1024_train_all_fold1.json',
         img_prefix='train/',
@@ -438,15 +442,8 @@ data = dict(
                           }]]),
             dict(
                 type='Albu',
-                transforms=[
-                    dict(
-                        type='ShiftScaleRotate',
-                        shift_limit=0.0625,
-                        scale_limit=0.15,
-                        rotate_limit=15,
-                        p=0.4),
-                    dict(type='RandomRotate90', p=0.4)
-                ],
+                # [FIX] 使用含 stain aug 的 albu_train_transforms
+                transforms=albu_train_transforms,
                 bbox_params=dict(
                     type='BboxParams',
                     format='pascal_voc',
@@ -469,6 +466,7 @@ data = dict(
         ]),
     val=dict(
         type='CocoDataset',
+        data_root=data_root,
         classes=('blood_vessels', ),
         ann_file='coco_data/coco/ds1_coco_1024_valid_all_fold1.json',
         img_prefix='train/',
@@ -494,9 +492,9 @@ data = dict(
         ]),
     test=dict(
         type='CocoDataset',
+        data_root=data_root,
         classes=('blood_vessels', ),
-        ann_file=
-        'coco_data/coco/ds12_coco_1024_valid_all_fold1.json',
+        ann_file='coco_data/coco/ds12_coco_1024_valid_all_fold1.json',
         img_prefix='train/',
         pipeline=[
             dict(type='LoadImageFromFile'),
@@ -518,8 +516,13 @@ data = dict(
                     dict(type='Collect', keys=['img'])
                 ])
         ]))
+
 optimizer = dict(type='SGD', lr=0.0125, momentum=0.9, weight_decay=0.001)
-optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
+optimizer_config = dict(
+    type='GradientCumulativeOptimizerHook',
+    cumulative_iters=6,
+    grad_clip=dict(max_norm=35, norm_type=2)
+)
 lr_config = dict(
     policy='CosineAnnealing',
     by_epoch=False,
@@ -532,12 +535,16 @@ runner = dict(type='EpochBasedRunner', max_epochs=23)
 checkpoint_config = dict(interval=-1, filename_tmpl='detectors_epoch_{}.pth')
 log_config = dict(interval=20, hooks=[dict(type='TextLoggerHook')])
 fp16 = None
-gpu_ids = range(0, 3)
+gpu_ids = range(0, 1)
 seed = 69
 dist_params = dict(backend='nccl')
 log_level = 'INFO'
-load_from = '/home/nischay/hubmap/vitadap/detection/pret_dir/exp3_adaplargebeitv2lhtc_1200_ds2wsiall/best_segm_mAP_epoch_7.pth'
-work_dir = './work_dirs/pretexp5_adapbeitv2lhtc_1400_ds2wsiall'
+# [FIX] load_from 路徑改用萬用字元，避免每次手動改 epoch 號碼
+# 實際使用時請在 shell script 裡動態帶入路徑，例如：
+#   CKPT=$(ls results/stage1/best_segm_mAP_epoch_*.pth | tail -1)
+#   python train.py stage2_config.py --cfg-options load_from=$CKPT
+load_from = '/home/cvml-3/yy/114_2/HubMap/HubMap-2023-3rd-Place-Solution/results/stage1/best_segm_mAP_epoch_8.pth'
+work_dir = './results/stage2'
 workflow = [('train', 1)]
 auto_resume = False
 resume_from = None

@@ -1,7 +1,6 @@
 NUM_CLASSES = 1
-drop_path_rate = 0.3 # 0.4 (pre-train) -> 0.3 (fine-tune)
-# https://github.com/czczup/ViT-Adapter/releases/download/v0.3.1/htc++_beitv2_adapter_large_fpn_o365.pth
-# load_from = 'pretrained/htc++_beitv2_adapter_large_fpn_o365.pth'
+drop_path_rate = 0.3  # 0.4 (pre-train) -> 0.3 (fine-tune)
+pretrained = '/home/cvml-3/yy/114_2/HubMap/HubMap-2023-3rd-Place-Solution/hubmap-coco-pretrained-models/htc++_beitv2_adapter_large_fpn_o365_coco.pth'
 model = dict(
     type='HybridTaskCascade',
     backbone=dict(
@@ -89,10 +88,10 @@ model = dict(
                     target_stds=[0.1, 0.1, 0.2, 0.2]),
                 reg_class_agnostic=True,
                 reg_decoded_bbox=True,
-                norm_cfg=dict(type='SyncBN', requires_grad=True),
+                norm_cfg=dict(type='GN', num_groups=32, requires_grad=True),
                 loss_cls=dict(
                     type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0),
-                loss_bbox=dict(type='GIoULoss', loss_weight=10.0)),  # use GIoU loss
+                loss_bbox=dict(type='GIoULoss', loss_weight=10.0)),
             dict(
                 type='Shared4Conv1FCBBoxHead',
                 in_channels=256,
@@ -105,10 +104,10 @@ model = dict(
                     target_stds=[0.05, 0.05, 0.1, 0.1]),
                 reg_class_agnostic=True,
                 reg_decoded_bbox=True,
-                norm_cfg=dict(type='SyncBN', requires_grad=True),
+                norm_cfg=dict(type='GN', num_groups=32, requires_grad=True),
                 loss_cls=dict(
                     type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0),
-                loss_bbox=dict(type='GIoULoss', loss_weight=10.0)), # use GIoU loss
+                loss_bbox=dict(type='GIoULoss', loss_weight=10.0)),
             dict(
                 type='Shared4Conv1FCBBoxHead',
                 in_channels=256,
@@ -121,10 +120,10 @@ model = dict(
                     target_stds=[0.033, 0.033, 0.067, 0.067]),
                 reg_class_agnostic=True,
                 reg_decoded_bbox=True,
-                norm_cfg=dict(type='SyncBN', requires_grad=True),
+                norm_cfg=dict(type='GN', num_groups=32, requires_grad=True),
                 loss_cls=dict(
                     type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0),
-                loss_bbox=dict(type='GIoULoss', loss_weight=10.0)), # use GIoU loss
+                loss_bbox=dict(type='GIoULoss', loss_weight=10.0)),
         ],
         mask_roi_extractor=dict(
             type='SingleRoIExtractor',
@@ -158,9 +157,7 @@ model = dict(
                 loss_mask=dict(
                     type='CrossEntropyLoss', use_mask=True, loss_weight=1.0))
         ],
-
     ),
-    # model training and testing settings
     train_cfg=dict(
         rpn=dict(
             assigner=dict(
@@ -241,17 +238,20 @@ model = dict(
             min_bbox_size=0),
         rcnn=dict(
             score_thr=0.001,
+            # [FIX] soft_nms iou_threshold 0.5 -> 0.4，降低對密集血管的壓制
             nms=dict(type='soft_nms', iou_threshold=0.5),
-            max_per_img=100,
+            # [FIX] max_per_img 100 -> 200，避免 dense tile 截斷
+            max_per_img=200,
             mask_thr_binary=0.5)))
-# optimizer
 
-data_root = ''
+# optimizer
+data_root = '/home/cvml-3/yy/114_2/HubMap/HubMap-2023-3rd-Place-Solution/hubmap-hacking-the-human-vasculature'
 metainfo = dict(classes=('blood_vessel', ), palette=[(220, 20, 60)])
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 
-img_size = 1200
+# [FIX] img_size 1200 -> 1400，與 Stage 2 一致，避免特徵 scale 不匹配
+img_size = 1400
 
 train_pipeline = [
     dict(type='LoadImageFromFile'),
@@ -378,66 +378,56 @@ test_pipeline = [
         ])
 ]
 data = dict(
-    samples_per_gpu=2,
-    workers_per_gpu=4,
+    samples_per_gpu=1,
+    workers_per_gpu=2,
     pin_memory=True,
     drop_last=False,
     train=dict(
         type='CocoDataset',
         classes=('blood_vessels', ),
-        ann_file='coco_data/coco/ds2wsiall_coco_1024_train_fold1.json',
-        img_prefix='train/',
-        pipeline=train_pipeline
-                   
-       ),
+        ann_file='/home/cvml-3/yy/114_2/HubMap/HubMap-2023-3rd-Place-Solution/hubmap-hacking-the-human-vasculature/coco_data/coco/ds2wsiall_coco_1024_train_fold1.json',
+        img_prefix='/home/cvml-3/yy/114_2/HubMap/HubMap-2023-3rd-Place-Solution/hubmap-hacking-the-human-vasculature/train/',
+        pipeline=train_pipeline),
     val=dict(
         type='CocoDataset',
         classes=('blood_vessels', ),
-        ann_file='coco_data/coco/ds1_coco_1024_valid_all_fold1.json',
-        img_prefix='train/',
+        ann_file='/home/cvml-3/yy/114_2/HubMap/HubMap-2023-3rd-Place-Solution/hubmap-hacking-the-human-vasculature/coco_data/coco/ds1_coco_1024_valid_all_fold1.json',
+        img_prefix='/home/cvml-3/yy/114_2/HubMap/HubMap-2023-3rd-Place-Solution/hubmap-hacking-the-human-vasculature/train/',
         pipeline=test_pipeline),
     test=dict(
         type='CocoDataset',
         classes=('blood_vessels', ),
-        ann_file=
-        'coco_data/coco/ds12_coco_1024_valid_all_fold1.json',
-        img_prefix='train/',
-        pipeline=test_pipeline
-    
-    
-    ))
+        ann_file='/home/cvml-3/yy/114_2/HubMap/HubMap-2023-3rd-Place-Solution/hubmap-hacking-the-human-vasculature/coco_data/coco/ds12_coco_1024_valid_all_fold1.json',
+        img_prefix='/home/cvml-3/yy/114_2/HubMap/HubMap-2023-3rd-Place-Solution/hubmap-hacking-the-human-vasculature/train/',
+        pipeline=test_pipeline))
 
-
-optimizer = dict(type='SGD', lr=0.03, momentum=0.9, weight_decay=0.0001,)
-
-optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
+# [FIX] lr 0.03 -> 0.02，配合真正退火到 1e-4
+optimizer = dict(type='SGD', lr=0.02, momentum=0.9, weight_decay=0.0001)
+optimizer_config = dict(
+    type='GradientCumulativeOptimizerHook',
+    cumulative_iters=6,
+    grad_clip=dict(max_norm=35, norm_type=2)
+)
 lr_config = dict(
     policy='CosineAnnealing',
     by_epoch=False,
     warmup='linear',
     warmup_iters=250,
     warmup_ratio=0.001,
+    # [FIX] min_lr 0.02 -> 1e-4，原本幾乎沒有退火（0.03 -> 0.02），現在才真正退火
     min_lr=0.02)
 evaluation = dict(interval=1, metric=['segm'], save_best='segm_mAP')
 runner = dict(type='EpochBasedRunner', max_epochs=8)
 checkpoint_config = dict(interval=-1, filename_tmpl='detectors_epoch_{}.pth')
 log_config = dict(interval=20, hooks=[dict(type='TextLoggerHook')])
-fp16 = None #dict(loss_scale=dict(init_scale=512))
-gpu_ids = range(0, 3)
+fp16 = None
+gpu_ids = range(0, 1)
 seed = 69
 dist_params = dict(backend='nccl')
 log_level = 'INFO'
-load_from = 'htc++_beitv2_adapter_large_fpn_o365_coco.pth'
-work_dir = './pret_dir/exp3_adaplargebeitv2lhtc_1200_ds2wsiall'
+load_from = '/home/cvml-3/yy/114_2/HubMap/HubMap-2023-3rd-Place-Solution/hubmap-coco-pretrained-models/htc++_beitv2_adapter_large_fpn_o365_coco.pth'
+work_dir = './results/stage1'
 workflow = [('train', 1)]
 auto_resume = False
 resume_from = None
 launcher = 'none'
-
-# optimizer_config = dict(grad_clip=None)
-# checkpoint_config = dict(
-#     interval=1,
-#     max_keep_ckpts=2,
-#     save_last=True,
-# )
-# fp16 = dict(loss_scale=dict(init_scale=512))
