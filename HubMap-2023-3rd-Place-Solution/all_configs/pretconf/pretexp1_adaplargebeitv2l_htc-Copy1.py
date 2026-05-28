@@ -1,6 +1,6 @@
 NUM_CLASSES = 1
 drop_path_rate = 0.3  # 0.4 (pre-train) -> 0.3 (fine-tune)
-pretrained = '/home/cvml-3/yy/114_2/HubMap/HubMap-2023-3rd-Place-Solution/hubmap-coco-pretrained-models/htc++_beitv2_adapter_large_fpn_o365_coco.pth'
+pretrained = './hubmap-coco-pretrained-models/htc++_beitv2_adapter_large_fpn_o365_coco.pth'
 model = dict(
     type='HybridTaskCascade',
     backbone=dict(
