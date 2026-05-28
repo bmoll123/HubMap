@@ -1,3 +1,5 @@
+import os
+import glob
 NUM_CLASSES = 1
 drop_path_rate = 0.2
 model = dict(
@@ -371,6 +373,11 @@ test_pipeline = [
             dict(type='Collect', keys=['img'])
         ])
 ]
+
+
+# 1. 定義資料集的相對路徑（相對於執行訓練腳本的專案根目錄）
+data_root = 'hubmap-hacking-the-human-vasculature'
+
 data = dict(
     samples_per_gpu=1,
     workers_per_gpu=2,
@@ -539,11 +546,15 @@ gpu_ids = range(0, 1)
 seed = 69
 dist_params = dict(backend='nccl')
 log_level = 'INFO'
-# [FIX] load_from 路徑改用萬用字元，避免每次手動改 epoch 號碼
-# 實際使用時請在 shell script 裡動態帶入路徑，例如：
-#   CKPT=$(ls results/stage1/best_segm_mAP_epoch_*.pth | tail -1)
-#   python train.py stage2_config.py --cfg-options load_from=$CKPT
-load_from = '/home/cvml-3/yy/114_2/HubMap/HubMap-2023-3rd-Place-Solution/results/stage1/best_segm_mAP_epoch_8.pth'
+
+# 2. [FIX] 透過 Python 萬用字元動態自動尋找最新的 stage1 權重檔案
+stage1_ckpts = sorted(glob.glob('results/stage1/best_segm_mAP_epoch_*.pth'))
+if stage1_ckpts:
+    load_from = stage1_ckpts[-1]  # 自動指派排序最後一個（通常是 Epoch 號碼最大的）
+else:
+    # 如果找不到任何萬用匹配，就留預設相對路徑
+    load_from = 'results/stage1/best_segm_mAP_epoch_8.pth'
+
 work_dir = './results/stage2'
 workflow = [('train', 1)]
 auto_resume = False

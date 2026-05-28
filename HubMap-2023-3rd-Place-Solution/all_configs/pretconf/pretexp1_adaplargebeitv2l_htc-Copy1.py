@@ -377,6 +377,9 @@ test_pipeline = [
             dict(type='Collect', keys=['img'])
         ])
 ]
+# 定義資料根目錄（可視需求改為相對路徑，例如 './hubmap-hacking-the-human-vasculature'）
+data_root = 'hubmap-hacking-the-human-vasculature'
+
 data = dict(
     samples_per_gpu=1,
     workers_per_gpu=2,
@@ -384,21 +387,24 @@ data = dict(
     drop_last=False,
     train=dict(
         type='CocoDataset',
+        data_root=data_root,  # 加入 data_root
         classes=('blood_vessels', ),
-        ann_file='/home/cvml-3/yy/114_2/HubMap/HubMap-2023-3rd-Place-Solution/hubmap-hacking-the-human-vasculature/coco_data/coco/ds2wsiall_coco_1024_train_fold1.json',
-        img_prefix='/home/cvml-3/yy/114_2/HubMap/HubMap-2023-3rd-Place-Solution/hubmap-hacking-the-human-vasculature/train/',
+        ann_file='coco_data/coco/ds2wsiall_coco_1024_train_fold1.json',  # 改為相對路徑
+        img_prefix='train/',  # 改為相對路徑
         pipeline=train_pipeline),
     val=dict(
         type='CocoDataset',
+        data_root=data_root,  # 加入 data_root
         classes=('blood_vessels', ),
-        ann_file='/home/cvml-3/yy/114_2/HubMap/HubMap-2023-3rd-Place-Solution/hubmap-hacking-the-human-vasculature/coco_data/coco/ds1_coco_1024_valid_all_fold1.json',
-        img_prefix='/home/cvml-3/yy/114_2/HubMap/HubMap-2023-3rd-Place-Solution/hubmap-hacking-the-human-vasculature/train/',
+        ann_file='coco_data/coco/ds1_coco_1024_valid_all_fold1.json',  # 改為相對路徑
+        img_prefix='train/',  # 改為相對路徑
         pipeline=test_pipeline),
     test=dict(
         type='CocoDataset',
+        data_root=data_root,  # 加入 data_root
         classes=('blood_vessels', ),
-        ann_file='/home/cvml-3/yy/114_2/HubMap/HubMap-2023-3rd-Place-Solution/hubmap-hacking-the-human-vasculature/coco_data/coco/ds12_coco_1024_valid_all_fold1.json',
-        img_prefix='/home/cvml-3/yy/114_2/HubMap/HubMap-2023-3rd-Place-Solution/hubmap-hacking-the-human-vasculature/train/',
+        ann_file='coco_data/coco/ds12_coco_1024_valid_all_fold1.json',  # 改為相對路徑
+        img_prefix='train/',  # 改為相對路徑
         pipeline=test_pipeline))
 
 # [FIX] lr 0.03 -> 0.02，配合真正退火到 1e-4
@@ -414,8 +420,9 @@ lr_config = dict(
     warmup='linear',
     warmup_iters=250,
     warmup_ratio=0.001,
-    # [FIX] min_lr 0.02 -> 1e-4，原本幾乎沒有退火（0.03 -> 0.02），現在才真正退火
-    min_lr=0.02)
+    # [FIXED BUG] 依據您的註解，將 min_lr 從 0.02 改為 1e-4，確保 CosineAnnealing 能正常退火
+    min_lr=1e-4)
+
 evaluation = dict(interval=1, metric=['segm'], save_best='segm_mAP')
 runner = dict(type='EpochBasedRunner', max_epochs=8)
 checkpoint_config = dict(interval=-1, filename_tmpl='detectors_epoch_{}.pth')
@@ -425,7 +432,9 @@ gpu_ids = range(0, 1)
 seed = 69
 dist_params = dict(backend='nccl')
 log_level = 'INFO'
-load_from = '/home/cvml-3/yy/114_2/HubMap/HubMap-2023-3rd-Place-Solution/hubmap-coco-pretrained-models/htc++_beitv2_adapter_large_fpn_o365_coco.pth'
+
+# 預訓練權重路徑（建議將模型放入專案目錄下，即可改為 './hubmap-coco-pretrained-models/...'）
+load_from = 'hubmap-coco-pretrained-models/htc++_beitv2_adapter_large_fpn_o365_coco.pth'
 work_dir = './results/stage1'
 workflow = [('train', 1)]
 auto_resume = False
