@@ -74,6 +74,60 @@ import datasets.register_hubmap  # 執行 register_coco_instances
 from datasets.register_hubmap import HuBMAPDatasetMapper
 from detectron2.data import build_detection_train_loader
 
+
+class MyCOCOEvaluator(COCOEvaluator):
+    def _derive_eval_metrics(self):
+        # 呼叫原生 D2/COCO 的評估邏輯，它會產生各種標準指標
+        metrics = super()._derive_eval_metrics()
+        
+        # 確保有評估結果存在且內含 coco_evaluator 物件
+        if not hasattr(self, "_coco_eval") or self._coco_eval is None:
+            return metrics
+            
+        # 取得優化後的 fast_eval_api 物件或是原生 coco 評估器
+        # 結構通常在 self._coco_eval 中
+        for task in ["bbox", "segm"]:
+            if task not in self._coco_eval:
+                continue
+            coco_eval = self._coco_eval[task]
+            
+            # 1. 找到 blood_vessel 的 category_id (從 metadata 中獲取)
+            cat_ids = coco_eval.params.catIds
+            # 根據你上一題的設定，classes=('blood_vessel', 'glomerulus', 'unsure')
+            # 假設 blood_vessel 是第 0 個
+            blood_vessel_cat_id = cat_ids[0] 
+            cat_idx = coco_eval.params.catIds.index(blood_vessel_cat_id)
+            
+            # 2. 找到 IoU = 0.60 在精度矩陣中的索引
+            # COCO 預設的 iouThrs 是 np.linspace(.5, .95, int(np.round((.95 - .5) / .05)) + 1, endpoint=True)
+            # 即 [0.5, 0.55, 0.6, 0.65, ...] -> 0.60 的 index 是 2
+            iou_thrs = list(coco_eval.params.iouThrs)
+            # 尋找與 0.6 最接近的 index (處理浮點數誤差)
+            try:
+                iou_idx = [abs(x - 0.6) < 1e-4 for x in iou_thrs].index(True)
+            except ValueError:
+                # 如果預設沒算 0.6，強行插入或跳過（COCO 預設必有 0.6）
+                continue
+                
+            # 3. 從 coco_eval.eval['precision'] 抽取特定的值
+            # 矩陣維度順序通常為: [TxRxKxAxM] 
+            # T(iou), R(recall), K(category), A(area), M(maxDets)
+            # 我們要看的是 all area (idx 0), maxDets=100 (通常是最後一個，例如 idx -1 或 2)
+            precision = coco_eval.eval['precision']
+            if precision is not None:
+                # 取出對應 iou_idx, cat_idx 下所有 Recall 的 precision
+                # 這裡對 Recall 轉置並取平均，即為該類別在特定 IoU 下的 AP
+                s = precision[iou_idx, :, cat_idx, 0, -1]
+                s = s[s > -1] # 移除無效值
+                ap60 = np.mean(s) * 100 if len(s) > 0 else 0.0
+                
+                # 4. 把指標塞入 metrics 字典中，供 Hook 讀取
+                # 格式如： "bbox/blood_vessel_AP60"
+                metrics[f"{task}/blood_vessel_AP60"] = ap60
+                print(f"\n[Custom Metric] Category blood_vessel {task} AP60: {ap60:.3f}\n")
+                
+        return metrics
+
 class Trainer(DefaultTrainer):
     """
     Extension of the Trainer class adapted to MaskFormer.
@@ -146,7 +200,9 @@ class Trainer(DefaultTrainer):
             )
         # instance segmentation
         if evaluator_type == "coco":
-            evaluator_list.append(COCOEvaluator(dataset_name, output_dir=output_folder))
+            evaluator_list.append(MyCOCOEvaluator(dataset_name, output_dir=output_folder))
+        # if evaluator_type == "coco":
+        #     evaluator_list.append(COCOEvaluator(dataset_name, output_dir=output_folder))
         # panoptic segmentation
         if evaluator_type in [
             "coco_panoptic_seg",
@@ -334,6 +390,30 @@ class Trainer(DefaultTrainer):
         res = cls.test(cfg, model, evaluators)
         res = OrderedDict({k + "_TTA": v for k, v in res.items()})
         return res
+    
+    def build_hooks(self):
+        cfg = self.cfg.clone()
+        cfg.defrost()
+        
+        # 1. 取得 DefaultTrainer 預設會註冊的所有 Hook
+        ret = super().build_hooks()
+        
+        # 2. 定義你要監控的自訂指標 (看你是想依據 bbox 還是 segm 的 AP60，以下用實體分割 segm 為例)
+        # 注意：這個字串必須跟剛才 MyCOCOEvaluator 塞進 metrics 的 key 完全一致
+        target_metric = "segm/blood_vessel_AP60" 
+        
+        # 3. 註冊 BestCheckpointer Hook
+        # 當每次 Evaluation 結束後，此 Hook 會檢查 target_metric 是否突破新高，若是則存成 best.pth
+        best_blv_hook = hooks.BestCheckpointer(
+            eval_period=cfg.TEST.EVAL_PERIOD,
+            checkpointer=self.checkpointer,
+            val_metric=target_metric,
+            mode="max",                  # 越高越好
+            file_prefix="best"           # 這會自動存成 "best.pth"
+        )
+        
+        ret.append(best_blv_hook)
+        return ret
 
 
 def setup(args):
