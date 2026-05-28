@@ -1,0 +1,38 @@
+_BASE_: "dimaskdino_r50_4scale_bs16_24ep.yaml"
+
+# ── Dataset ──────────────────────────────────
+DATASETS:
+  TRAIN: ("hubmap_train_fold0",)
+  TEST:  ("hubmap_val_fold0",)
+
+# ── 類別數（blood_vessel / glomerulus / unsure）
+MODEL:
+  SEM_SEG_HEAD:
+    NUM_CLASSES: 3
+  MaskDINO:
+    NUM_CLASSES: 3
+
+# ── 輸入尺寸（mapper 裡讀這個）─────────────
+INPUT:
+  FORMAT: "RGB"
+  HUBMAP_IMG_SIZE: 768   # 自訂 key，HuBMAPDatasetMapper 會讀取
+  DATASET_MAPPER_NAME: "hubmap"
+
+# ── Solver ────────────────────────────────────
+SOLVER:
+  IMS_PER_BATCH: 4
+  BASE_LR: 0.0001          # finetune 從 COCO pretrained，lr 要小
+  MAX_ITER: 20000
+  STEPS: (16000, 18000)
+  WARMUP_ITERS: 500
+  CHECKPOINT_PERIOD: 2000
+
+# ── Pretrained weights ────────────────────────
+MODEL:
+  WEIGHTS: "/home/cvml-3/yy/114_2/HubMap/DI-MaskDINO/weights/model_r50_ep50_bs16_51.9boxAP_46.7maskAP.pth"
+
+# ── Output ────────────────────────────────────
+OUTPUT_DIR: "./output/hubmap_fold0"
+# ── 驗證設置 ─────────────────────────────────
+TEST:
+  EVAL_PERIOD: 2000       # 每 2000 iteration 運行一次驗證
