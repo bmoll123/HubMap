@@ -75,56 +75,86 @@ from datasets.register_hubmap import HuBMAPDatasetMapper
 from detectron2.data import build_detection_train_loader
 
 
+import numpy as np
+import detectron2.utils.comm as comm
+
 class MyCOCOEvaluator(COCOEvaluator):
     def _derive_eval_metrics(self):
-        # 呼叫原生 D2/COCO 的評估邏輯，它會產生各種標準指標
+        # 1. 先執行原生的評估，拿到基本指標
         metrics = super()._derive_eval_metrics()
         
-        # 確保有評估結果存在且內含 coco_evaluator 物件
         if not hasattr(self, "_coco_eval") or self._coco_eval is None:
             return metrics
             
-        # 取得優化後的 fast_eval_api 物件或是原生 coco 評估器
-        # 結構通常在 self._coco_eval 中
+        # 2. 定義我們要抓取的目標類別名稱
+        target_class_name = "blood_vessel"
+        
+        # 取得目前驗證集註冊的元數據類別列表：['blood_vessel', 'glomerulus', 'unsure']
+        meta = MetadataCatalog.get(self._dataset_name)
+        class_names = meta.get("thing_classes", [])
+        
+        if target_class_name not in class_names:
+            print(f"\n[AP60 Error] '{target_class_name}' not found in dataset metadata classes: {class_names}\n")
+            return metrics
+            
+        # 找出 blood_vessel 在當前元數據中的真實 position (應該是 0)
+        target_class_standard_idx = class_names.index(target_class_name)
+        
         for task in ["bbox", "segm"]:
             if task not in self._coco_eval:
                 continue
             coco_eval = self._coco_eval[task]
             
-            # 1. 找到 blood_vessel 的 category_id (從 metadata 中獲取)
-            cat_ids = coco_eval.params.catIds
-            # 根據你上一題的設定，classes=('blood_vessel', 'glomerulus', 'unsure')
-            # 假設 blood_vessel 是第 0 個
-            blood_vessel_cat_id = cat_ids[0] 
-            cat_idx = coco_eval.params.catIds.index(blood_vessel_cat_id)
-            
-            # 2. 找到 IoU = 0.60 在精度矩陣中的索引
-            # COCO 預設的 iouThrs 是 np.linspace(.5, .95, int(np.round((.95 - .5) / .05)) + 1, endpoint=True)
-            # 即 [0.5, 0.55, 0.6, 0.65, ...] -> 0.60 的 index 是 2
-            iou_thrs = list(coco_eval.params.iouThrs)
-            # 尋找與 0.6 最接近的 index (處理浮點數誤差)
-            try:
-                iou_idx = [abs(x - 0.6) < 1e-4 for x in iou_thrs].index(True)
-            except ValueError:
-                # 如果預設沒算 0.6，強行插入或跳過（COCO 預設必有 0.6）
+            if not hasattr(coco_eval, "eval") or coco_eval.eval is None:
                 continue
                 
-            # 3. 從 coco_eval.eval['precision'] 抽取特定的值
-            # 矩陣維度順序通常為: [TxRxKxAxM] 
-            # T(iou), R(recall), K(category), A(area), M(maxDets)
-            # 我們要看的是 all area (idx 0), maxDets=100 (通常是最後一個，例如 idx -1 或 2)
-            precision = coco_eval.eval['precision']
-            if precision is not None:
-                # 取出對應 iou_idx, cat_idx 下所有 Recall 的 precision
-                # 這裡對 Recall 轉置並取平均，即為該類別在特定 IoU 下的 AP
+            try:
+                # 找出 COCO 內部實際評估的 catIds 列表
+                # 並且對應出 target_class_name 的 COCO 內部索引
+                cat_ids = coco_eval.params.catIds
+                
+                # 透過標準 ID 找出它在 COCO params 裡的相對位置 (cat_idx)
+                # 這是安全抽取 precision 矩陣的唯一正確索引
+                cat_idx = None
+                for idx, cid in enumerate(cat_ids):
+                    # 透過對應關係確認這個 cid 是不是 blood_vessel
+                    if idx == target_class_standard_idx: 
+                        cat_idx = idx
+                        break
+                
+                if cat_idx is None or cat_idx >= coco_eval.eval['precision'].shape[2]:
+                    # 雙重防禦：如果索引超出當前矩陣大小，直接安全退場
+                    continue
+                
+                # 找到 IoU = 0.60 所在的 index
+                iou_thrs = list(coco_eval.params.iouThrs)
+                # 尋找與 0.60 差距小於 1e-4 的位置 (通常 index 是 2)
+                iou_idx = [abs(x - 0.6) < 1e-4 for x in iou_thrs].index(True)
+                
+                # 抽取精準度矩陣 [T, R, K, A, M]
+                # T: iou_idx
+                # R: : (代表所有的 Recall 點)
+                # K: cat_idx (我們的 blood_vessel)
+                # A: 0 (代表 All Area 面積)
+                # M: -1 (代表 maxDets=100)
+                precision = coco_eval.eval['precision']
                 s = precision[iou_idx, :, cat_idx, 0, -1]
-                s = s[s > -1] # 移除無效值
+                s = s[s > -1]  # 濾除 -1 的無效欄位
+                
                 ap60 = np.mean(s) * 100 if len(s) > 0 else 0.0
                 
-                # 4. 把指標塞入 metrics 字典中，供 Hook 讀取
-                # 格式如： "bbox/blood_vessel_AP60"
+                # 🟢 關鍵強行寫入：直接塞進回傳字典中
                 metrics[f"{task}/blood_vessel_AP60"] = ap60
-                print(f"\n[Custom Metric] Category blood_vessel {task} AP60: {ap60:.3f}\n")
+                
+                # 🟢 強制在終端機與 Log 檔案中高亮印出，不讓你漏掉
+                print("\n" + "="*60)
+                print(f" SUCCESS: {task}/blood_vessel_AP60 = {ap60:.3f}")
+                print("="*60 + "\n")
+                
+            except Exception as e:
+                # 如果真的不幸發生非預期錯誤，至少把錯誤訊息印出來，不要默默吞掉
+                print(f"\n[AP60 Custom Evaluator Error Log]: {str(e)}\n")
+                continue
                 
         return metrics
 
