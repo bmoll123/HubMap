@@ -44,11 +44,14 @@ model = dict(
             ffn_ratio=4.0,
             drop_path=0.2),
         dict(
-            type='FPN',
+            type='LNNHopfieldFPN',
             in_channels=[1024, 1024, 1024, 1024],
             norm_cfg=dict(type='GN', num_groups=32),
             out_channels=256,
-            num_outs=5)
+            num_outs=5,
+            num_prototypes=128,
+            hopfield_beta=1.0,
+            cfc_hidden_ratio=1.0)
     ],
     rpn_head=dict(
         type='RPNHead',

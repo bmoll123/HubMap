@@ -3,3 +3,6 @@ hubmap-coco-pretrained-models/
 hubmap-hacking-the-human-vasculature/
 
 *.zip
+
+data/
+reference_module/
