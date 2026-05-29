@@ -80,6 +80,20 @@ CUDA_VISIBLE_DEVICES=0 python train.py \
     --launcher none --seed 69
 ```
 
+### Dual-Scale Consistency Stage 1（COCO pretrained 起點）
+```bash
+CUDA_VISIBLE_DEVICES=0 python train.py \
+    all_configs/pretconf/pretexp1_adaplargebeitv2l_htc-v2_consistency.py \
+    --launcher none --seed 69
+```
+
+### Dual-Scale Consistency Stage 2（需先完成 Consistency Stage 1）
+```bash
+CUDA_VISIBLE_DEVICES=0 python train.py \
+    all_configs/nops_config_finetune/exp4_adapbeitv2l_consistency.py \
+    --launcher none --seed 69
+```
+
 ### Resume 訓練
 ```bash
 CUDA_VISIBLE_DEVICES=0 python train.py \
