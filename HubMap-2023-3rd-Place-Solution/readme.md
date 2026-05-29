@@ -35,3 +35,9 @@ python train.py ./all_configs/nops_config_finetune/exp4_adapbeitv2l.py --launche
 ### Stage 1 + 2
 chmod +x dist_train.sh
 ./dist_train.sh
+
+
+
+
+### 加semantica mask
+先跑python ./tools/generate_semantic_masks.py
