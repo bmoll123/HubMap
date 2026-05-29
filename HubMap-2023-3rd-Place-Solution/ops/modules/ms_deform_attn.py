@@ -16,10 +16,8 @@ import torch.nn.functional as F
 from torch import nn
 from torch.nn.init import constant_, xavier_uniform_
 
-from mmcv.ops.multi_scale_deform_attn import MultiScaleDeformableAttnFunction as MSDeformAttnFunction
-
-# from ..functions import MSDeformAttnFunction
-# from mmcv.ops.multi_scale_deform_attn import ext_module as MSDA
+# 使用本地編譯的 .so，不依賴系統 mmcv
+from ..functions import MSDeformAttnFunction
 
 def _is_power_of_2(n):
     if (not isinstance(n, int)) or (n < 0):

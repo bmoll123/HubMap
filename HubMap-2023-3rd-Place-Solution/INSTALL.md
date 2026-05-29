@@ -119,3 +119,50 @@ HubMap-2023-3rd-Place-Solution/
     ├── tile_meta.csv
     └── coco_data/          ← hubmap-coco-datasets.zip 解壓結果
 ```
+
+---
+
+## 長期方案：Kaggle 離線可重現部署（建議）
+
+目標：避免每次 Submit 受外網與 GPU 架構差異影響。
+
+### A. 在可上網 + 可用 GPU 的環境打包離線 bundle
+
+```bash
+cd /path/to/HubMap-2023-3rd-Place-Solution
+bash scripts/build_offline_bundle.sh /tmp/hubmap_offline_bundle
+```
+
+輸出內容：
+- `/tmp/hubmap_offline_bundle/wheels/`：所有離線安裝 wheel（含 mmcv_full）
+- `/tmp/hubmap_offline_bundle/ops/`：已編好的本地 `MultiScaleDeformableAttention` 所需檔案
+
+再把 `/tmp/hubmap_offline_bundle` 上傳成 Kaggle Dataset。
+
+### B. 在 Kaggle Notebook（離線）安裝與健檢
+
+```bash
+python scripts/kaggle_offline_setup.py \
+    --wheel-dir /kaggle/input/<your-dataset>/wheels \
+    --ops-dir /kaggle/input/<your-dataset>/ops \
+    --copy-ops-to /kaggle/working/ops
+```
+
+此腳本會：
+1. 用 `--no-index --find-links` 從本地 wheel 安裝套件
+2. 檢查 `mmcv.ops.nms` 與 `mmcv.ops.roi_align` 的 CUDA 路徑
+3. 檢查本地 `MultiScaleDeformableAttention` 可匯入
+
+### C. 推論腳本路徑
+
+離線 setup 完成後，推論腳本請維持：
+```python
+sys.path.insert(0, "/kaggle/working/ops")
+```
+
+### D. 依賴清單維護
+
+離線 runtime 套件清單放在：
+`requirements/offline_runtime.txt`
+
+若新增套件，請先更新此檔，再重跑 `scripts/build_offline_bundle.sh`。

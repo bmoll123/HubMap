@@ -7,9 +7,8 @@
 # ------------------------------------------------------------------------------------------------
 
 from __future__ import absolute_import, division, print_function
-from mmcv.ops.multi_scale_deform_attn import MultiScaleDeformableAttnFunction as MSDA
-
-# import MultiScaleDeformableAttention as MSDA
+# 使用本地編譯的 .so，不依賴系統 mmcv
+import MultiScaleDeformableAttention as MSDA
 import torch
 import torch.nn.functional as F
 from torch.autograd import Function
@@ -23,11 +22,9 @@ class MSDeformAttnFunction(Function):
     def forward(ctx, value, value_spatial_shapes, value_level_start_index,
                 sampling_locations, attention_weights, im2col_step):
         ctx.im2col_step = im2col_step
-        output = MSDA.forward(value, value_spatial_shapes,
-                                             value_level_start_index,
-                                             sampling_locations,
-                                             attention_weights,
-                                             ctx.im2col_step)
+        output = MSDA.ms_deform_attn_forward(
+            value, value_spatial_shapes, value_level_start_index,
+            sampling_locations, attention_weights, ctx.im2col_step)
         ctx.save_for_backward(value, value_spatial_shapes,
                               value_level_start_index, sampling_locations,
                               attention_weights)
@@ -40,7 +37,7 @@ class MSDeformAttnFunction(Function):
         value, value_spatial_shapes, value_level_start_index, \
         sampling_locations, attention_weights = ctx.saved_tensors
         grad_value, grad_sampling_loc, grad_attn_weight = \
-            MSDA.forward(
+            MSDA.ms_deform_attn_backward(
                 value, value_spatial_shapes, value_level_start_index,
                 sampling_locations, attention_weights, grad_output, ctx.im2col_step)
 
