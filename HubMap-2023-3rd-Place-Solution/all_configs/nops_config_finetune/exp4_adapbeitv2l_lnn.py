@@ -44,11 +44,14 @@ model = dict(
             ffn_ratio=4.0,
             drop_path=0.2),
         dict(
-            type='FPN',
+            type='LNNHopfieldFPN',
             in_channels=[1024, 1024, 1024, 1024],
             norm_cfg=dict(type='GN', num_groups=32),
             out_channels=256,
-            num_outs=5)
+            num_outs=5,
+            num_prototypes=128,
+            hopfield_beta=1.0,
+            cfc_hidden_ratio=1.0)
     ],
     rpn_head=dict(
         type='RPNHead',
@@ -555,7 +558,7 @@ else:
     # 如果找不到任何萬用匹配，就留預設相對路徑
     load_from = 'results/stage1/best_segm_mAP_epoch_8.pth'
 
-work_dir = './results/stage2'
+work_dir = './results/stage2_lnn'
 workflow = [('train', 1)]
 auto_resume = False
 resume_from = None
