@@ -32,7 +32,7 @@ MODEL:
   WEIGHTS: "./weights/model_r50_ep50_bs16_51.9boxAP_46.7maskAP.pth"
 
 # ── Output ────────────────────────────────────
-OUTPUT_DIR: "./output/d1_fold0_d2"
+OUTPUT_DIR: "./output/hubmap_fold0"
 # ── 驗證設置 ─────────────────────────────────
 TEST:
   EVAL_PERIOD: 2000       # 每 2000 iteration 運行一次驗證

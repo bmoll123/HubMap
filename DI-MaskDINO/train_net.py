@@ -31,10 +31,8 @@ ids = [0, 1, 2, 3]
 warnings.filterwarnings("ignore")
 
 import torch
+import numpy as np
 
-# ─── 🟢 關鍵修正 1：移除所有第三方自訂的頂層 import，保持最上方絕對乾淨 ───
-
-# Detectron2 核心組件導入（這些不會引發循環，可以安全放在頂層）
 import detectron2.utils.comm as comm
 from detectron2.checkpoint import DetectionCheckpointer
 from detectron2.config import get_cfg
@@ -67,7 +65,7 @@ from detectron2.engine import (
     SimpleTrainer,
 )
 
-# MaskDINO 原生組件導入（此時會觸發 dimaskdino.__init__，讓它順利跑完原生註冊）
+# MaskDINO
 from dimaskdino import (
     COCOInstanceNewBaselineDatasetMapper,
     COCOPanopticNewBaselineDatasetMapper,
@@ -77,10 +75,23 @@ from dimaskdino import (
     add_dimaskdino_config,
     DetrDatasetMapper,
 )
+import random
+from detectron2.engine import (
+    DefaultTrainer,
+    default_argument_parser,
+    default_setup,
+    hooks,
+    launch,
+    create_ddp_model,
+    AMPTrainer,
+    SimpleTrainer,
+)
+import weakref
+import datasets.register_hubmap  # 執行 register_coco_instances
 
+# ── 在 Trainer class 裡加 build_train_loader ──
 from datasets.register_hubmap import HuBMAPDatasetMapper
-from torch.utils.data import Sampler
-import itertools
+from detectron2.data import build_detection_train_loader
 
 
 import numpy as np
@@ -178,11 +189,10 @@ class Trainer(DefaultTrainer):
     def __init__(self, cfg):
         super(DefaultTrainer, self).__init__()
         logger = logging.getLogger("detectron2")
-        if not logger.isEnabledFor(logging.INFO):  # setup_logger is not called for d2
+        if not logger.isEnabledFor(logging.INFO):
             setup_logger()
         cfg = DefaultTrainer.auto_scale_workers(cfg, comm.get_world_size())
 
-        # Assume these objects must be constructed in this order.
         model = self.build_model(cfg)
         optimizer = self.build_optimizer(cfg, model)
         data_loader = self.build_train_loader(cfg)
@@ -194,13 +204,10 @@ class Trainer(DefaultTrainer):
 
         self.scheduler = self.build_lr_scheduler(cfg, optimizer)
 
-        # add model EMA
         kwargs = {
             "trainer": weakref.proxy(self),
         }
-        # kwargs.update(model_ema.may_get_ema_checkpointer(cfg, model)) TODO: release ema training for large models
         self.checkpointer = DetectionCheckpointer(
-            # Assume you want to save checkpoints together with logs/statistics
             model,
             cfg.OUTPUT_DIR,
             **kwargs,
@@ -210,29 +217,20 @@ class Trainer(DefaultTrainer):
         self.cfg = cfg
 
         self.register_hooks(self.build_hooks())
-        # TODO: release model conversion checkpointer from DINO to MaskDINO
         self.checkpointer = DetectionCheckpointer(
-            # Assume you want to save checkpoints together with logs/statistics
             model,
             cfg.OUTPUT_DIR,
             **kwargs,
         )
-        # TODO: release GPU cluster submit scripts based on submitit for multi-node training
 
     @classmethod
     def build_evaluator(cls, cfg, dataset_name, output_folder=None):
-        """
-        Create evaluator(s) for a given dataset.
-        This uses the special metadata "evaluator_type" associated with each
-        builtin dataset. For your own dataset, you can simply create an
-        evaluator manually in your script and do not have to worry about the
-        hacky if-else logic here.
-        """
         if output_folder is None:
             output_folder = os.path.join(cfg.OUTPUT_DIR, "inference")
         evaluator_list = []
         evaluator_type = MetadataCatalog.get(dataset_name).evaluator_type
-        # semantic segmentation
+
+        # 語意分割
         if evaluator_type in ["sem_seg", "ade20k_panoptic_seg"]:
             evaluator_list.append(
                 SemSegEvaluator(
@@ -324,11 +322,10 @@ class Trainer(DefaultTrainer):
         # LVIS
         if evaluator_type == "lvis":
             return LVISEvaluator(dataset_name, output_dir=output_folder)
+
         if len(evaluator_list) == 0:
             raise NotImplementedError(
-                "no Evaluator for the dataset {} with the type {}".format(
-                    dataset_name, evaluator_type
-                )
+                f"no Evaluator for the dataset {dataset_name} with the type {evaluator_type}"
             )
         elif len(evaluator_list) == 1:
             return evaluator_list[0]
@@ -336,66 +333,25 @@ class Trainer(DefaultTrainer):
 
     @classmethod
     def build_train_loader(cls, cfg):
-        # coco instance segmentation lsj new baseline
         if cfg.INPUT.DATASET_MAPPER_NAME == "hubmap":
+            from datasets.register_hubmap import HuBMAPDatasetMapper
+            from detectron2.data import get_detection_dataset_dicts
+            from torch.utils.data import Sampler, Dataset
+            import itertools
+            import random
+
             mapper = HuBMAPDatasetMapper(cfg, is_train=True)
-            dataset_names = cfg.DATASETS.TRAIN
-            datasets = [get_detection_dataset_dicts([name]) for name in dataset_names]
-
-            # 2. 自訂一個簡單的 1:3 比例採樣器
-            class RatioSampler(Sampler):
-                def __init__(self, datasets, batch_size, ratio):
-                    self.datasets = datasets  # [ds1, ds2]
-                    self.batch_size = batch_size
-                    self.ratio = ratio  # [1, 3]
-
-                    # 預先計算每個 dataset 的索引長度
-                    self.lengths = [len(d) for d in datasets]
-                    self.indices = [list(range(l)) for l in self.lengths]
-
-                def __iter__(self):
-                    # 每個 epoch 重新洗牌
-                    shuffled_indices = [
-                        random.sample(idx, len(idx)) for idx in self.indices
-                    ]
-                    iters = [itertools.cycle(idx) for idx in shuffled_indices]
-
-                    # 根據比例生成 batch
-                    num_batches = sum(self.lengths) // self.batch_size
-                    for _ in range(num_batches):
-                        batch = []
-                        # 1 個 ds1 + 3 個 ds2
-                        batch.extend([next(iters[0]) for _ in range(self.ratio[0])])
-                        batch.extend([next(iters[1]) for _ in range(self.ratio[1])])
-                        yield from batch
-
-                def __len__(self):
-                    return sum(self.lengths)
-
-            # 3. 初始化採樣器與 DataLoader
-            sampler = RatioSampler(datasets, cfg.SOLVER.IMS_PER_BATCH, ratio=[1, 3])
-
-            # 這裡需要把 dataset 合併成一個列表傳入
-            # 注意：這裡將兩個 dataset 平攤成一個大的 list 供 loader 讀取
-            combined_datasets = list(itertools.chain(*datasets))
-
-            return build_detection_train_loader(
-                cfg, mapper=mapper, sampler=sampler, dataset=combined_datasets
-            )
-
+            return build_detection_train_loader(cfg, mapper=mapper)
         # coco instance segmentation lsj new baseline
         if cfg.INPUT.DATASET_MAPPER_NAME == "coco_instance_lsj":
             mapper = COCOInstanceNewBaselineDatasetMapper(cfg, True)
             return build_detection_train_loader(cfg, mapper=mapper)
-        # coco instance segmentation lsj new baseline
         elif cfg.INPUT.DATASET_MAPPER_NAME == "coco_instance_detr":
             mapper = DetrDatasetMapper(cfg, True)
             return build_detection_train_loader(cfg, mapper=mapper)
-        # coco panoptic segmentation lsj new baseline
         elif cfg.INPUT.DATASET_MAPPER_NAME == "coco_panoptic_lsj":
             mapper = COCOPanopticNewBaselineDatasetMapper(cfg, True)
             return build_detection_train_loader(cfg, mapper=mapper)
-        # Semantic segmentation dataset mapper
         elif cfg.INPUT.DATASET_MAPPER_NAME == "mask_former_semantic":
             mapper = MaskFormerSemanticDatasetMapper(cfg, True)
             return build_detection_train_loader(cfg, mapper=mapper)
@@ -405,10 +361,6 @@ class Trainer(DefaultTrainer):
 
     @classmethod
     def build_lr_scheduler(cls, cfg, optimizer):
-        """
-        It now calls :func:`detectron2.solver.build_lr_scheduler`.
-        Overwrite it if you'd like a different scheduler.
-        """
         return build_lr_scheduler(cfg, optimizer)
 
     @classmethod
@@ -416,16 +368,13 @@ class Trainer(DefaultTrainer):
         weight_decay_norm = cfg.SOLVER.WEIGHT_DECAY_NORM
         weight_decay_embed = cfg.SOLVER.WEIGHT_DECAY_EMBED
 
-        defaults = {}
-        defaults["lr"] = cfg.SOLVER.BASE_LR
-        defaults["weight_decay"] = cfg.SOLVER.WEIGHT_DECAY
+        defaults = {"lr": cfg.SOLVER.BASE_LR, "weight_decay": cfg.SOLVER.WEIGHT_DECAY}
 
         norm_module_types = (
             torch.nn.BatchNorm1d,
             torch.nn.BatchNorm2d,
             torch.nn.BatchNorm3d,
             torch.nn.SyncBatchNorm,
-            # NaiveSyncBatchNorm inherits from BatchNorm2d
             torch.nn.GroupNorm,
             torch.nn.InstanceNorm1d,
             torch.nn.InstanceNorm2d,
@@ -438,10 +387,7 @@ class Trainer(DefaultTrainer):
         memo: Set[torch.nn.parameter.Parameter] = set()
         for module_name, module in model.named_modules():
             for module_param_name, value in module.named_parameters(recurse=False):
-                if not value.requires_grad:
-                    continue
-                # Avoid duplicating parameters
-                if value in memo:
+                if not value.requires_grad or value in memo:
                     continue
                 memo.add(value)
 
@@ -454,7 +400,6 @@ class Trainer(DefaultTrainer):
                     "relative_position_bias_table" in module_param_name
                     or "absolute_pos_embed" in module_param_name
                 ):
-                    print(module_param_name)
                     hyperparams["weight_decay"] = 0.0
                 if isinstance(module, norm_module_types):
                     hyperparams["weight_decay"] = weight_decay_norm
@@ -463,7 +408,6 @@ class Trainer(DefaultTrainer):
                 params.append({"params": [value], **hyperparams})
 
         def maybe_add_full_model_gradient_clipping(optim):
-            # detectron2 doesn't have full model gradient clipping now
             clip_norm_val = cfg.SOLVER.CLIP_GRADIENTS.CLIP_VALUE
             enable = (
                 cfg.SOLVER.CLIP_GRADIENTS.ENABLED
@@ -499,7 +443,6 @@ class Trainer(DefaultTrainer):
     @classmethod
     def test_with_TTA(cls, cfg, model):
         logger = logging.getLogger("detectron2.trainer")
-        # In the end of training, run an evaluation with TTA.
         logger.info("Running inference with test-time augmentation ...")
         model = SemanticSegmentorWithTTA(cfg, model)
         evaluators = [
@@ -538,11 +481,7 @@ class Trainer(DefaultTrainer):
 
 
 def setup(args):
-    """
-    Create configs and perform basic setups.
-    """
     cfg = get_cfg()
-    # for poly lr schedule
     add_deeplab_config(cfg)
     add_dimaskdino_config(cfg)
     cfg.merge_from_file(args.config_file)
@@ -582,7 +521,7 @@ if __name__ == "__main__":
     parser.add_argument("--eval_only", action="store_true")
     parser.add_argument("--EVAL_FLAG", type=int, default=1)
     args = parser.parse_args()
-    # random port
+
     port = random.randint(1000, 20000)
     args.dist_url = "tcp://127.0.0.1:" + str(port)
     print("Command Line Args:", args)

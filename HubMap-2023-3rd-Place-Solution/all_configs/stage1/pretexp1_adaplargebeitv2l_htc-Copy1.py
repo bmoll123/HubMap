@@ -1,9 +1,6 @@
-import os
-import glob
-
 NUM_CLASSES = 1
-drop_path_rate = 0.2
-
+drop_path_rate = 0.3  # 0.4 (pre-train) -> 0.3 (fine-tune)
+pretrained = './hubmap-coco-pretrained-models/htc++_beitv2_adapter_large_fpn_o365_coco.pth'
 model = dict(
     type='HybridTaskCascade',
     backbone=dict(
@@ -17,7 +14,7 @@ model = dict(
         qkv_bias=True,
         use_abs_pos_emb=False,
         use_rel_pos_bias=True,
-        init_values=1e-06,
+        init_values=1e-6,
         drop_path_rate=drop_path_rate,
         conv_inplane=64,
         n_points=4,
@@ -25,18 +22,14 @@ model = dict(
         cffn_ratio=0.25,
         deform_ratio=0.5,
         with_cp=True,
-        window_attn=[
-            True, True, True, True, True, True,
-            True, True, True, True, True, True,
-            True, True, True, True, True, True,
-            True, True, True, True, True, True
-        ],
-        window_size=[
-            14, 14, 14, 14, 14, 56,
-            14, 14, 14, 14, 14, 56,
-            14, 14, 14, 14, 14, 56,
-            14, 14, 14, 14, 14, 56,
-        ],
+        window_attn=[True, True, True, True, True, True,
+                     True, True, True, True, True, True,
+                     True, True, True, True, True, True,
+                     True, True, True, True, True, True],
+        window_size=[14, 14, 14, 14, 14, 56,
+                     14, 14, 14, 14, 14, 56,
+                     14, 14, 14, 14, 14, 56,
+                     14, 14, 14, 14, 14, 56],
         interaction_indexes=[[0, 5], [6, 11], [12, 17], [18, 23]],
         pretrained=None),
     neck=[
@@ -47,15 +40,14 @@ model = dict(
             with_ffn=True,
             with_cp=True,
             ffn_ratio=4.0,
-            drop_path=0.1),
-        # ─── [MODIFIED] 將原先的 FPN 升級為 PAFPN ───
+            drop_path=drop_path_rate,
+        ),
         dict(
-            type='PAFPN',
+            type='FPN',
             in_channels=[1024, 1024, 1024, 1024],
             norm_cfg=dict(type='GN', num_groups=32),
             out_channels=256,
-            num_outs=5)  # 拔除不支援的 add_extra_convs 與 relu_before_extra_convs
-    ],
+            num_outs=5)],
     rpn_head=dict(
         type='RPNHead',
         in_channels=256,
@@ -67,21 +59,20 @@ model = dict(
             strides=[4, 8, 16, 32, 64]),
         bbox_coder=dict(
             type='DeltaXYWHBBoxCoder',
-            target_means=[0.0, 0.0, 0.0, 0.0],
+            target_means=[.0, .0, .0, .0],
             target_stds=[1.0, 1.0, 1.0, 1.0]),
         loss_cls=dict(
             type='CrossEntropyLoss', use_sigmoid=True, loss_weight=1.0),
-        loss_bbox=dict(
-            type='SmoothL1Loss', beta=0.1111111111111111, loss_weight=1.0)),
+        loss_bbox=dict(type='SmoothL1Loss', beta=1.0 / 9.0, loss_weight=1.0)),
     roi_head=dict(
         type='HybridTaskCascadeRoIHead',
         interleaved=True,
         mask_info_flow=True,
         num_stages=3,
-        stage_loss_weights=[1, 0.75, 0.5],
+        stage_loss_weights=[1, 0.5, 0.25],
         bbox_roi_extractor=dict(
             type='SingleRoIExtractor',
-            roi_layer=dict(type='RoIAlign', output_size=7, sampling_ratio=2),
+            roi_layer=dict(type='RoIAlign', output_size=7, sampling_ratio=0),
             out_channels=256,
             featmap_strides=[4, 8, 16, 32]),
         bbox_head=[
@@ -136,7 +127,7 @@ model = dict(
         ],
         mask_roi_extractor=dict(
             type='SingleRoIExtractor',
-            roi_layer=dict(type='RoIAlign', output_size=14, sampling_ratio=2),
+            roi_layer=dict(type='RoIAlign', output_size=14, sampling_ratio=0),
             out_channels=256,
             featmap_strides=[4, 8, 16, 32]),
         mask_head=[
@@ -148,7 +139,7 @@ model = dict(
                 conv_out_channels=256,
                 num_classes=1,
                 loss_mask=dict(
-                    type='CrossEntropyLoss', use_mask=True, loss_weight=1.5)),
+                    type='CrossEntropyLoss', use_mask=True, loss_weight=1.0)),
             dict(
                 type='HTCMaskHead',
                 num_convs=4,
@@ -156,7 +147,7 @@ model = dict(
                 conv_out_channels=256,
                 num_classes=1,
                 loss_mask=dict(
-                    type='CrossEntropyLoss', use_mask=True, loss_weight=1.5)),
+                    type='CrossEntropyLoss', use_mask=True, loss_weight=1.0)),
             dict(
                 type='HTCMaskHead',
                 num_convs=4,
@@ -164,8 +155,9 @@ model = dict(
                 conv_out_channels=256,
                 num_classes=1,
                 loss_mask=dict(
-                    type='CrossEntropyLoss', use_mask=True, loss_weight=1.5)),
-        ]),
+                    type='CrossEntropyLoss', use_mask=True, loss_weight=1.0))
+        ],
+    ),
     train_cfg=dict(
         rpn=dict(
             assigner=dict(
@@ -236,7 +228,7 @@ model = dict(
                     add_gt_as_proposals=True),
                 mask_size=28,
                 pos_weight=-1,
-                debug=False),
+                debug=False)
         ]),
     test_cfg=dict(
         rpn=dict(
@@ -246,66 +238,107 @@ model = dict(
             min_bbox_size=0),
         rcnn=dict(
             score_thr=0.001,
-            nms=dict(type='soft_nms', iou_threshold=0.4),
-            max_per_img=300,
-            mask_thr_binary=0.45)))
+            # [FIX] soft_nms iou_threshold 0.5 -> 0.4，降低對密集血管的壓制
+            nms=dict(type='soft_nms', iou_threshold=0.5),
+            # [FIX] max_per_img 100 -> 200，避免 dense tile 截斷
+            max_per_img=200,
+            mask_thr_binary=0.5)))
 
-metainfo = dict(classes=('blood_vessels', ), palette=[(220, 20, 60)])
+# optimizer
+data_root = '/home/cvml-3/yy/114_2/HubMap/HubMap-2023-3rd-Place-Solution/hubmap-hacking-the-human-vasculature'
+metainfo = dict(classes=('blood_vessel', ), palette=[(220, 20, 60)])
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
-img_size = 1400
 
-albu_train_transforms = [
-    dict(
-        type='ShiftScaleRotate',
-        shift_limit=0.0625,
-        scale_limit=0.15,
-        rotate_limit=15,
-        p=0.4),
-    dict(type='RandomRotate90', p=0.4),
-    dict(type='HueSaturationValue',
-         hue_shift_limit=15, sat_shift_limit=25, val_shift_limit=15, p=0.4),
-    dict(type='CLAHE', clip_limit=3.0, tile_grid_size=(8, 8), p=0.3),
-    dict(type='GaussianBlur', blur_limit=(3, 5), p=0.2),
-]
+# [FIX] img_size 1200 -> 1400，與 Stage 2 一致，避免特徵 scale 不匹配
+img_size = 1400
 
 train_pipeline = [
     dict(type='LoadImageFromFile'),
-    dict(type='LoadAnnotations', with_bbox=True, with_mask=True,),
-    dict(type='Resize', 
-         img_scale=[(1400, 1400)], 
-         multiscale_mode='value', 
-         keep_ratio=True),
+    dict(type='LoadAnnotations', with_bbox=True, with_mask=True),
+
+    # dict(type='Mosaic', img_scale=(img_size, img_size), pad_val=114.0),
+
+    # dict(
+    #     type='MixUp',
+    #     img_scale=(img_size, img_size),
+    #     ratio_range=(0.8, 1.6),
+    #     pad_val=114.0),
+    # dict(type='RandomCrop', crop_size=(2048, 2048), cat_max_ratio=0.75),
+    
+    dict(type='Resize', img_scale=[(img_size, img_size)], keep_ratio=True),
+
     dict(
         type='RandomFlip',
         direction=['horizontal', 'vertical'],
         flip_ratio=0.5),
     dict(
         type='AutoAugment',
-        policies=[
-            [{'type': 'Shear', 'prob': 0.4, 'level': 0}],
-            [{'type': 'Translate', 'prob': 0.4, 'level': 5}],
-            [{'type': 'PhotoMetricDistortion',
-              'brightness_delta': 32,
-              'contrast_range': (0.5, 1.5),
-              'hue_delta': 18}],
-            [{'type': 'MinIoURandomCrop',
-              'min_ious': (0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
-              'min_crop_size': 0.3}],
-            [{'type': 'CutOut',
-              'n_holes': (5, 10),
-              'cutout_shape': [(4, 4), (4, 8), (8, 4), (8, 8),
-                               (16, 32), (32, 16), (32, 32),
-                               (32, 48), (48, 32), (48, 48)]}],
-            [{'type': 'BrightnessTransform', 'prob': 0.6, 'level': 4},
-             {'type': 'ContrastTransform', 'prob': 0.6, 'level': 6},
-             {'type': 'Rotate', 'prob': 0.6, 'level': 10}],
-            [{'type': 'ColorTransform', 'prob': 1.0, 'level': 6},
-             {'type': 'EqualizeTransform'}],
-        ]),
+        policies=[[{
+            'type': 'Shear',
+            'prob': 0.4,
+            'level': 0
+        }], 
+        #           [{
+        #     'type': 'Translate',
+        #     'prob': 0.4,
+        #     'level': 5
+        # }],
+                # [{
+                #       'type': 'PhotoMetricDistortion',
+                #       'brightness_delta': 32,
+                #       'contrast_range': (0.5, 1.5),
+                #       'hue_delta': 18
+                #   }],
+                  # [{
+                  #     'type': 'MinIoURandomCrop',
+                  #     'min_ious': (0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
+                  #     'min_crop_size': 0.3
+                  # }],
+                  # [{
+                  #     'type':
+                  #     'CutOut',
+                  #     'n_holes': (5, 10),
+                  #     'cutout_shape': [(4, 4), (4, 8), (8, 4), (8, 8),
+                  #                      (16, 32), (32, 16), (32, 32), (32, 48),
+                  #                      (48, 32), (48, 48)]
+                  # }],
+                  
+                  # [
+                  #    {
+                  #       'type': 'BrightnessTransform',
+                  #             'prob': 0.6,
+                  #             'level': 4
+                  #         }, ],
+                   
+                   
+                   
+                  #  [{
+                  #     'type': 'ColorTransform',
+                  #     'prob': 1.0,
+                  #     'level': 6
+                  # }, 
+   
+                   
+                   
+                   [{
+                      'type': 'EqualizeTransform'
+                  }]]),
     dict(
         type='Albu',
-        transforms=albu_train_transforms,
+        transforms=[
+            dict(
+                type='ShiftScaleRotate',
+                shift_limit=0.0625,
+                scale_limit=0.15,
+                rotate_limit=15,
+                p=0.4),
+            # dict(type='RandomRotate90', p=0.4),
+            # dict(type='RandomGamma',p=0.1),
+            # dict(type='CLAHE',p=0.1)
+
+
+        ],
         bbox_params=dict(
             type='BboxParams',
             format='pascal_voc',
@@ -322,9 +355,8 @@ train_pipeline = [
         to_rgb=True),
     dict(type='Pad', size_divisor=32),
     dict(type='DefaultFormatBundle'),
-    dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_labels', 'gt_masks']),
+    dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_labels', 'gt_masks'])
 ]
-
 test_pipeline = [
     dict(type='LoadImageFromFile'),
     dict(
@@ -342,10 +374,10 @@ test_pipeline = [
                 to_rgb=True),
             dict(type='Pad', size_divisor=32),
             dict(type='ImageToTensor', keys=['img']),
-            dict(type='Collect', keys=['img']),
+            dict(type='Collect', keys=['img'])
         ])
 ]
-
+# 定義資料根目錄（可視需求改為相對路徑，例如 './hubmap-hacking-the-human-vasculature'）
 data_root = 'hubmap-hacking-the-human-vasculature'
 
 data = dict(
@@ -355,41 +387,44 @@ data = dict(
     drop_last=False,
     train=dict(
         type='CocoDataset',
-        data_root=data_root,
+        data_root=data_root,  # 加入 data_root
         classes=('blood_vessels', ),
-        ann_file='coco_data/coco/ds1_coco_1024_train_all_fold1.json',
-        img_prefix='train/',
+        ann_file='coco_data/coco/ds2wsiall_coco_1024_train_fold1.json',  # 改為相對路徑
+        img_prefix='train/',  # 改為相對路徑
         pipeline=train_pipeline),
     val=dict(
         type='CocoDataset',
-        data_root=data_root,
+        data_root=data_root,  # 加入 data_root
         classes=('blood_vessels', ),
-        ann_file='coco_data/coco/ds1_coco_1024_valid_all_fold1.json',
-        img_prefix='train/',
+        ann_file='coco_data/coco/ds1_coco_1024_valid_all_fold1.json',  # 改為相對路徑
+        img_prefix='train/',  # 改為相對路徑
         pipeline=test_pipeline),
     test=dict(
         type='CocoDataset',
-        data_root=data_root,
+        data_root=data_root,  # 加入 data_root
         classes=('blood_vessels', ),
-        ann_file='coco_data/coco/ds12_coco_1024_valid_all_fold1.json',
-        img_prefix='train/',
+        ann_file='coco_data/coco/ds12_coco_1024_valid_all_fold1.json',  # 改為相對路徑
+        img_prefix='train/',  # 改為相對路徑
         pipeline=test_pipeline))
 
-optimizer = dict(type='SGD', lr=0.0125, momentum=0.9, weight_decay=0.0001)
+# [FIX] lr 0.03 -> 0.02，配合真正退火到 1e-4
+optimizer = dict(type='SGD', lr=0.02, momentum=0.9, weight_decay=0.0001)
 optimizer_config = dict(
     type='GradientCumulativeOptimizerHook',
     cumulative_iters=6,
-    grad_clip=dict(max_norm=35, norm_type=2))
+    grad_clip=dict(max_norm=35, norm_type=2)
+)
 lr_config = dict(
     policy='CosineAnnealing',
     by_epoch=False,
     warmup='linear',
-    warmup_iters=300,
+    warmup_iters=250,
     warmup_ratio=0.001,
-    min_lr=1e-08)
+    # [FIXED BUG] 依據您的註解，將 min_lr 從 0.02 改為 1e-4，確保 CosineAnnealing 能正常退火
+    min_lr=1e-4)
 
 evaluation = dict(interval=1, metric=['segm'], save_best='segm_mAP')
-runner = dict(type='EpochBasedRunner', max_epochs=30)
+runner = dict(type='EpochBasedRunner', max_epochs=8)
 checkpoint_config = dict(interval=-1, filename_tmpl='detectors_epoch_{}.pth')
 log_config = dict(interval=20, hooks=[dict(type='TextLoggerHook')])
 fp16 = None
@@ -398,15 +433,10 @@ seed = 69
 dist_params = dict(backend='nccl')
 log_level = 'INFO'
 
-stage1_ckpts = sorted(glob.glob('results/0529/stage1/best_segm_mAP_epoch_*.pth'))
-if stage1_ckpts:
-    load_from = stage1_ckpts[-1]
-else:
-    load_from = 'results/0529/stage1/best_segm_mAP_epoch_12.pth'
-
-work_dir = './results/0529/stage2'
+# 預訓練權重路徑（建議將模型放入專案目錄下，即可改為 './hubmap-coco-pretrained-models/...'）
+load_from = 'hubmap-coco-pretrained-models/htc++_beitv2_adapter_large_fpn_o365_coco.pth'
+work_dir = './results/stage1'
 workflow = [('train', 1)]
 auto_resume = False
 resume_from = None
 launcher = 'none'
-device = 'cuda'
