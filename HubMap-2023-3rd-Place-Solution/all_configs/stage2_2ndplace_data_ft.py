@@ -1,10 +1,8 @@
 """
-Stage 2: Finetuning using 3rd-Place model architecture on 2nd-Place dataset
-Only 3 folds DS1 for 15 epochs
+Stage 2: Finetuning using 3rd-Place model architecture (HybridTaskCascade + BEiTAdapter)
+Dataset: 2nd-Place 9tiles_crop128 dataset (4 train sets + val/test)
+Augmentation: MMDet-native pipeline (no Albu), with StainTransform + PhotoMetricDistortion
 """
-
-import os
-import glob
 
 NUM_CLASSES = 1
 drop_path_rate = 0.2  # Lower drop_path for finetune
@@ -30,32 +28,7 @@ model = dict(
         cffn_ratio=0.25,
         deform_ratio=0.5,
         with_cp=True,
-        window_attn=[
-            True,
-            True,
-            True,
-            True,
-            True,
-            True,
-            True,
-            True,
-            True,
-            True,
-            True,
-            True,
-            True,
-            True,
-            True,
-            True,
-            True,
-            True,
-            True,
-            True,
-            True,
-            True,
-            True,
-            True,
-        ],
+        window_attn=[True] * 24,
         window_size=[
             14,
             14,
@@ -206,9 +179,7 @@ model = dict(
                 in_channels=256,
                 conv_out_channels=256,
                 num_classes=NUM_CLASSES,
-                loss_mask=dict(
-                    type="CrossEntropyLoss", use_sigmoid=True, loss_weight=1.0
-                ),
+                loss_mask=dict(type="CrossEntropyLoss", use_mask=True, loss_weight=1.0),
             ),
             dict(
                 type="HTCMaskHead",
@@ -217,9 +188,7 @@ model = dict(
                 in_channels=256,
                 conv_out_channels=256,
                 num_classes=NUM_CLASSES,
-                loss_mask=dict(
-                    type="CrossEntropyLoss", use_sigmoid=True, loss_weight=1.0
-                ),
+                loss_mask=dict(type="CrossEntropyLoss", use_mask=True, loss_weight=1.0),
             ),
             dict(
                 type="HTCMaskHead",
@@ -228,9 +197,7 @@ model = dict(
                 in_channels=256,
                 conv_out_channels=256,
                 num_classes=NUM_CLASSES,
-                loss_mask=dict(
-                    type="CrossEntropyLoss", use_sigmoid=True, loss_weight=1.0
-                ),
+                loss_mask=dict(type="CrossEntropyLoss", use_mask=True, loss_weight=1.0),
             ),
         ],
     ),
@@ -331,35 +298,208 @@ model = dict(
             min_bbox_size=0,
         ),
         rcnn=dict(
-            score_thr=0.05,
-            nms=dict(type="nms", iou_threshold=0.5),
-            max_per_img=100,
+            score_thr=0.001,  # 調低門檻捕捉微弱特徵
+            nms=dict(
+                type="soft_nms", iou_threshold=0.4
+            ),  # 使用 soft_nms 降低密集物件互相壓制的問題
+            max_per_img=200,  # 放寬單張上限避免密集區域被截斷
             mask_thr_binary=0.5,
         ),
     ),
 )
 
-# dataset settings
+# ======================== Dataset & Augmentation ========================
 dataset_type = "CocoDataset"
-data_root = "../data/"
+data_root = "datasets/"
+classes = ("blood_vessel",)
+
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True
 )
+
+stn_aug_root = "datasets/stain_9tiles_augs/"
+stn_img_ext = ".tif"
+margin = 128
+
+# ---------------------------------------------------------------------------
+# General train pipeline (MMDet-native, no Albu)
+# - StainTransform prob=0.5
+# - H+V flip, PhotoMetricDistortion, AutoAugment multi-scale
+# ---------------------------------------------------------------------------
 train_pipeline = [
     dict(type="LoadImageFromFile"),
     dict(type="LoadAnnotations", with_bbox=True, with_mask=True),
-    dict(type="Resize", img_scale=(1024, 1024), keep_ratio=True),
-    dict(type="RandomFlip", flip_ratio=0.5),
+    dict(
+        type="StainTransform",
+        img_aug_root=stn_aug_root,
+        img_ext=stn_img_ext,
+        margin=margin,
+        prob=0.5,
+    ),
+    dict(type="RandomFlip", direction="horizontal", flip_ratio=0.5),
+    dict(type="RandomFlip", direction="vertical", flip_ratio=0.5),
+    dict(
+        type="PhotoMetricDistortion",
+        brightness_delta=32,
+        contrast_range=(0.5, 1.5),
+        saturation_range=(0.5, 1.5),
+        hue_delta=18,
+    ),
+    dict(
+        type="AutoAugment",
+        policies=[
+            [
+                dict(
+                    type="Resize",
+                    img_scale=[
+                        (800, 1333),
+                        (832, 1333),
+                        (864, 1333),
+                        (896, 1333),
+                        (928, 1333),
+                        (960, 1333),
+                        (992, 1333),
+                        (1024, 1333),
+                        (1056, 1333),
+                        (1088, 1333),
+                        (1120, 1333),
+                    ],
+                    multiscale_mode="value",
+                    keep_ratio=True,
+                )
+            ],
+            [
+                dict(
+                    type="Resize",
+                    img_scale=[(900, 1333), (1000, 1333), (1100, 1333)],
+                    multiscale_mode="value",
+                    keep_ratio=True,
+                ),
+                dict(
+                    type="RandomCrop",
+                    crop_type="absolute_range",
+                    crop_size=(768, 900),
+                    allow_negative_crop=True,
+                ),
+                dict(
+                    type="Resize",
+                    img_scale=[
+                        (800, 1333),
+                        (832, 1333),
+                        (864, 1333),
+                        (896, 1333),
+                        (928, 1333),
+                        (960, 1333),
+                        (992, 1333),
+                        (1024, 1333),
+                        (1056, 1333),
+                        (1088, 1333),
+                        (1120, 1333),
+                    ],
+                    multiscale_mode="value",
+                    override=True,
+                    keep_ratio=True,
+                ),
+            ],
+        ],
+    ),
     dict(type="Normalize", **img_norm_cfg),
     dict(type="Pad", size_divisor=32),
     dict(type="DefaultFormatBundle"),
     dict(type="Collect", keys=["img", "gt_bboxes", "gt_labels", "gt_masks"]),
 ]
+
+# ---------------------------------------------------------------------------
+# Same-WSI train pipeline: StainTransform prob=1.0（強制 domain shift）
+# ---------------------------------------------------------------------------
+train_same_wsi_pipeline = [
+    dict(type="LoadImageFromFile"),
+    dict(type="LoadAnnotations", with_bbox=True, with_mask=True),
+    dict(
+        type="StainTransform",
+        img_aug_root=stn_aug_root,
+        img_ext=stn_img_ext,
+        margin=margin,
+        prob=1.0,
+    ),
+    dict(type="RandomFlip", direction="horizontal", flip_ratio=0.5),
+    dict(type="RandomFlip", direction="vertical", flip_ratio=0.5),
+    dict(
+        type="PhotoMetricDistortion",
+        brightness_delta=32,
+        contrast_range=(0.5, 1.5),
+        saturation_range=(0.5, 1.5),
+        hue_delta=18,
+    ),
+    dict(
+        type="AutoAugment",
+        policies=[
+            [
+                dict(
+                    type="Resize",
+                    img_scale=[
+                        (800, 1333),
+                        (832, 1333),
+                        (864, 1333),
+                        (896, 1333),
+                        (928, 1333),
+                        (960, 1333),
+                        (992, 1333),
+                        (1024, 1333),
+                        (1056, 1333),
+                        (1088, 1333),
+                        (1120, 1333),
+                    ],
+                    multiscale_mode="value",
+                    keep_ratio=True,
+                )
+            ],
+            [
+                dict(
+                    type="Resize",
+                    img_scale=[(900, 1333), (1000, 1333), (1100, 1333)],
+                    multiscale_mode="value",
+                    keep_ratio=True,
+                ),
+                dict(
+                    type="RandomCrop",
+                    crop_type="absolute_range",
+                    crop_size=(768, 900),
+                    allow_negative_crop=True,
+                ),
+                dict(
+                    type="Resize",
+                    img_scale=[
+                        (800, 1333),
+                        (832, 1333),
+                        (864, 1333),
+                        (896, 1333),
+                        (928, 1333),
+                        (960, 1333),
+                        (992, 1333),
+                        (1024, 1333),
+                        (1056, 1333),
+                        (1088, 1333),
+                        (1120, 1333),
+                    ],
+                    multiscale_mode="value",
+                    override=True,
+                    keep_ratio=True,
+                ),
+            ],
+        ],
+    ),
+    dict(type="Normalize", **img_norm_cfg),
+    dict(type="Pad", size_divisor=32),
+    dict(type="DefaultFormatBundle"),
+    dict(type="Collect", keys=["img", "gt_bboxes", "gt_labels", "gt_masks"]),
+]
+
 test_pipeline = [
     dict(type="LoadImageFromFile"),
     dict(
         type="MultiScaleFlipAug",
-        img_scale=(1024, 1024),
+        img_scale=(1333, 1024),
         flip=False,
         transforms=[
             dict(type="Resize", keep_ratio=True),
@@ -372,65 +512,81 @@ test_pipeline = [
     ),
 ]
 
-classes = ("blood_vessel",)
-
-# Stage 2: Only 3 folds DS1 for 15 epochs (finetune)
+# ======================== Data ========================
+# train_set1 (ds1_wsi1_right): same-WSI pipeline, StainTransform=1.0
+# train_set2~4: general pipeline, StainTransform=0.5
 data = dict(
     samples_per_gpu=2,
     workers_per_gpu=2,
-    train=dict(
-        type="ConcatDataset",
-        datasets=[
-            dict(
-                type=dataset_type,
-                ann_file=data_root + "hm_1cls/ds1/ds1_wsi1_right.json",
-                img_prefix=data_root + "train/",
-                classes=classes,
-                pipeline=train_pipeline,
-            ),
-            dict(
-                type=dataset_type,
-                ann_file=data_root + "hm_1cls/ds1/ds1_wsi2_left.json",
-                img_prefix=data_root + "train/",
-                classes=classes,
-                pipeline=train_pipeline,
-            ),
-            dict(
-                type=dataset_type,
-                ann_file=data_root + "hm_1cls/ds1/ds1_wsi2_right.json",
-                img_prefix=data_root + "train/",
-                classes=classes,
-                pipeline=train_pipeline,
-            ),
-        ],
-    ),
+    train=[
+        dict(
+            type=dataset_type,
+            ann_file=data_root + "hm_9tiles_crop128_1cls/ds1/ds1_wsi1_right_train.json",
+            img_prefix=data_root + "train_9tiles_crop128/",
+            classes=classes,
+            filter_empty_gt=True,
+            pipeline=train_same_wsi_pipeline,
+        ),
+        dict(
+            type=dataset_type,
+            ann_file=data_root + "hm_9tiles_crop128_1cls/ds1/ds1_wsi2_left_train.json",
+            img_prefix=data_root + "train_9tiles_crop128/",
+            classes=classes,
+            filter_empty_gt=True,
+            pipeline=train_pipeline,
+        ),
+        dict(
+            type=dataset_type,
+            ann_file=data_root + "hm_9tiles_crop128_1cls/ds1/ds1_wsi2_right_train.json",
+            img_prefix=data_root + "train_9tiles_crop128/",
+            classes=classes,
+            filter_empty_gt=True,
+            pipeline=train_pipeline,
+        ),
+        dict(
+            type=dataset_type,
+            ann_file=data_root + "hm_9tiles_crop128_1cls/ds1/ds1_wsi2_ignore.json",
+            img_prefix=data_root + "train_9tiles_crop128/",
+            classes=classes,
+            filter_empty_gt=True,
+            pipeline=train_pipeline,
+        ),
+    ],
     val=dict(
         type=dataset_type,
-        ann_file=data_root + "dval0i.json",
-        img_prefix=data_root + "train/",
+        ann_file=data_root + "hm_9tiles_crop128_1cls/ds1/ds1_wsi1_left_val.json",
+        img_prefix=data_root + "train_9tiles_crop128/",
         classes=classes,
         pipeline=test_pipeline,
     ),
     test=dict(
         type=dataset_type,
-        ann_file=data_root + "dval0i.json",
-        img_prefix=data_root + "train/",
+        ann_file=data_root + "hm_9tiles_crop128_1cls/ds1/ds1_wsi1_left_val.json",
+        img_prefix=data_root + "train_9tiles_crop128/",
         classes=classes,
         pipeline=test_pipeline,
     ),
+    persistent_workers=False,
 )
 
-# optimizer
+# ======================== Optimizer & Schedule ========================
 optimizer = dict(type="SGD", lr=0.01, momentum=0.9, weight_decay=0.0001)
 optimizer_config = dict(grad_clip=None)
-# learning policy
+
 lr_config = dict(
-    policy="step", warmup="linear", warmup_iters=500, warmup_ratio=0.001, step=[12, 14]
+    policy="step",
+    warmup="linear",
+    warmup_iters=500,
+    warmup_ratio=0.001,
+    step=[12, 14],
 )
+
 runner = dict(type="EpochBasedRunner", max_epochs=15)
 
-# misc settings
-checkpoint_config = dict(interval=1)
+# ======================== Misc ========================
+checkpoint_config = dict(
+    interval=1, save_last=True, max_keep_ckpts=5, save_optimizer=False
+)
 log_config = dict(
     interval=50,
     hooks=[
@@ -440,7 +596,8 @@ log_config = dict(
 custom_hooks = [dict(type="NumClassCheckHook")]
 dist_params = dict(backend="nccl")
 log_level = "INFO"
-load_from = None  # Will load from stage1 checkpoint
+load_from = "/home/yuyun/Desktop/HubMap/HubMap-2023-3rd-Place-Solution/results/0529/stage1/epoch_12.pth"
 resume_from = None
 workflow = [("train", 1)]
-evaluation = dict(interval=1, metric=["bbox", "segm"])
+evaluation = dict(save_best="auto", rule="greater", interval=1, metric=["bbox", "segm"])
+work_dir = "./results/stage2_finetune_9tiles"
