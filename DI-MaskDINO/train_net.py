@@ -6,10 +6,12 @@
 """
 MaskDINO Training Script based on Mask2Former.
 """
+
 try:
     from shapely.errors import ShapelyDeprecationWarning
     import warnings
-    warnings.filterwarnings('ignore', category=ShapelyDeprecationWarning)
+
+    warnings.filterwarnings("ignore", category=ShapelyDeprecationWarning)
 except:
     pass
 
@@ -17,21 +19,29 @@ import copy
 import itertools
 import logging
 import os
-os.environ['CUDA_VISIBLE_DEVICES']='0, 1, 2, 3'
-ids = [0, 1, 2, 3]
+import random
 import warnings
-warnings.filterwarnings("ignore")
-
 from collections import OrderedDict
 from typing import Any, Dict, List, Set
+import weakref
+
+# 限制 GPU
+os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1, 2, 3"
+ids = [0, 1, 2, 3]
+warnings.filterwarnings("ignore")
 
 import torch
+import numpy as np
 
+# Detectron2 核心組件導入
 import detectron2.utils.comm as comm
 from detectron2.checkpoint import DetectionCheckpointer
 from detectron2.config import get_cfg
-from detectron2.data import MetadataCatalog, build_detection_train_loader
-
+from detectron2.data import (
+    MetadataCatalog,
+    build_detection_train_loader,
+    get_detection_dataset_dicts,
+)
 from detectron2.evaluation import (
     CityscapesInstanceEvaluator,
     CityscapesSemSegEvaluator,
@@ -45,8 +55,18 @@ from detectron2.evaluation import (
 from detectron2.projects.deeplab import add_deeplab_config, build_lr_scheduler
 from detectron2.solver.build import maybe_add_gradient_clipping
 from detectron2.utils.logger import setup_logger
+from detectron2.engine import (
+    DefaultTrainer,
+    default_argument_parser,
+    default_setup,
+    hooks,
+    launch,
+    create_ddp_model,
+    AMPTrainer,
+    SimpleTrainer,
+)
 
-# MaskDINO
+# MaskDINO 原生組件導入
 from dimaskdino import (
     COCOInstanceNewBaselineDatasetMapper,
     COCOPanopticNewBaselineDatasetMapper,
@@ -56,120 +76,74 @@ from dimaskdino import (
     add_dimaskdino_config,
     DetrDatasetMapper,
 )
-import random
-from detectron2.engine import (
-    DefaultTrainer,
-    default_argument_parser,
-    default_setup,
-    hooks,
-    launch,
-    create_ddp_model,
-    AMPTrainer,
-    SimpleTrainer
-)
-import weakref
-import datasets.register_hubmap  # 執行 register_coco_instances
 
-# ── 在 Trainer class 裡加 build_train_loader ──
-from datasets.register_hubmap import HuBMAPDatasetMapper
-from detectron2.data import build_detection_train_loader
+from torch.utils.data import Sampler
 
-
-import numpy as np
-import detectron2.utils.comm as comm
 
 class MyCOCOEvaluator(COCOEvaluator):
-    def _derive_eval_metrics(self):
-        # 1. 先執行原生的評估，拿到基本指標
-        metrics = super()._derive_eval_metrics()
-        
-        if not hasattr(self, "_coco_eval") or self._coco_eval is None:
-            return metrics
-            
-        # 2. 定義我們要抓取的目標類別名稱
-        target_class_name = "blood_vessel"
-        
-        # 取得目前驗證集註冊的元數據類別列表：['blood_vessel', 'glomerulus', 'unsure']
-        meta = MetadataCatalog.get(self._dataset_name)
-        class_names = meta.get("thing_classes", [])
-        
-        if target_class_name not in class_names:
-            print(f"\n[AP60 Error] '{target_class_name}' not found in dataset metadata classes: {class_names}\n")
-            return metrics
-            
-        # 找出 blood_vessel 在當前元數據中的真實 position (應該是 0)
-        target_class_standard_idx = class_names.index(target_class_name)
-        
-        for task in ["bbox", "segm"]:
-            if task not in self._coco_eval:
-                continue
-            coco_eval = self._coco_eval[task]
-            
-            if not hasattr(coco_eval, "eval") or coco_eval.eval is None:
-                continue
-                
-            try:
-                # 找出 COCO 內部實際評估的 catIds 列表
-                # 並且對應出 target_class_name 的 COCO 內部索引
-                cat_ids = coco_eval.params.catIds
-                
-                # 透過標準 ID 找出它在 COCO params 裡的相對位置 (cat_idx)
-                # 這是安全抽取 precision 矩陣的唯一正確索引
-                cat_idx = None
-                for idx, cid in enumerate(cat_ids):
-                    # 透過對應關係確認這個 cid 是不是 blood_vessel
-                    if idx == target_class_standard_idx: 
-                        cat_idx = idx
-                        break
-                
-                if cat_idx is None or cat_idx >= coco_eval.eval['precision'].shape[2]:
-                    # 雙重防禦：如果索引超出當前矩陣大小，直接安全退場
-                    continue
-                
-                # 找到 IoU = 0.60 所在的 index
-                iou_thrs = list(coco_eval.params.iouThrs)
-                # 尋找與 0.60 差距小於 1e-4 的位置 (通常 index 是 2)
-                iou_idx = [abs(x - 0.6) < 1e-4 for x in iou_thrs].index(True)
-                
-                # 抽取精準度矩陣 [T, R, K, A, M]
-                # T: iou_idx
-                # R: : (代表所有的 Recall 點)
-                # K: cat_idx (我們的 blood_vessel)
-                # A: 0 (代表 All Area 面積)
-                # M: -1 (代表 maxDets=100)
-                precision = coco_eval.eval['precision']
-                s = precision[iou_idx, :, cat_idx, 0, -1]
-                s = s[s > -1]  # 濾除 -1 的無效欄位
-                
-                ap60 = np.mean(s) * 100 if len(s) > 0 else 0.0
-                
-                # 🟢 關鍵強行寫入：直接塞進回傳字典中
-                metrics[f"{task}/blood_vessel_AP60"] = ap60
-                
-                # 🟢 強制在終端機與 Log 檔案中高亮印出，不讓你漏掉
-                print("\n" + "="*60)
-                print(f" SUCCESS: {task}/blood_vessel_AP60 = {ap60:.3f}")
-                print("="*60 + "\n")
-                
-            except Exception as e:
-                # 如果真的不幸發生非預期錯誤，至少把錯誤訊息印出來，不要默默吞掉
-                print(f"\n[AP60 Custom Evaluator Error Log]: {str(e)}\n")
-                continue
-                
-        return metrics
+    def _eval_predictions(self, predictions, img_ids=None):
+        num_classes = len(self._metadata.thing_classes)
+        for pred in predictions:
+            if "instances" in pred:
+                for instance in pred["instances"]:
+                    if instance.get("category_id", 0) >= num_classes:
+                        instance["category_id"] = num_classes - 1
+        return super()._eval_predictions(predictions, img_ids=img_ids)
+
+    def _derive_coco_results(self, coco_eval, iou_type, class_names=None):
+        # 🔑 這裡才是真正有 coco_eval 物件的地方，先讓原本的跑完
+        results = super()._derive_coco_results(coco_eval, iou_type, class_names)
+
+        # 只對 segm 任務做 AP60 抽取
+        if iou_type != "segm" or coco_eval is None:
+            return results
+
+        try:
+            target_class_name = "blood_vessel"
+            class_names_list = list(class_names) if class_names else []
+            if target_class_name not in class_names_list:
+                print(f"\n❌ AP60: '{target_class_name}' 不在 {class_names_list}\n")
+                return results
+
+            target_class_idx = class_names_list.index(target_class_name)
+
+            iou_thrs = list(coco_eval.params.iouThrs)
+            iou_idx = next(
+                (i for i, x in enumerate(iou_thrs) if abs(x - 0.6) < 1e-4), None
+            )
+            if iou_idx is None:
+                print(f"\n❌ AP60: 找不到 IoU=0.60，現有: {iou_thrs}\n")
+                return results
+
+            precision = coco_eval.eval["precision"]
+            s = precision[iou_idx, :, target_class_idx, 0, -1]
+            s = s[s > -1]
+            ap60 = float(np.mean(s) * 100) if len(s) > 0 else 0.0
+
+            results["blood_vessel_AP60"] = ap60
+            print(f"\n✅ segm/blood_vessel_AP60 = {ap60:.4f}\n")
+
+        except Exception as e:
+            import traceback
+
+            print(f"\n❌ AP60 Error: {e}")
+            traceback.print_exc()
+
+        return results
+
 
 class Trainer(DefaultTrainer):
     """
     Extension of the Trainer class adapted to MaskFormer.
     """
+
     def __init__(self, cfg):
         super(DefaultTrainer, self).__init__()
         logger = logging.getLogger("detectron2")
-        if not logger.isEnabledFor(logging.INFO):  # setup_logger is not called for d2
+        if not logger.isEnabledFor(logging.INFO):
             setup_logger()
         cfg = DefaultTrainer.auto_scale_workers(cfg, comm.get_world_size())
 
-        # Assume these objects must be constructed in this order.
         model = self.build_model(cfg)
         optimizer = self.build_optimizer(cfg, model)
         data_loader = self.build_train_loader(cfg)
@@ -181,13 +155,10 @@ class Trainer(DefaultTrainer):
 
         self.scheduler = self.build_lr_scheduler(cfg, optimizer)
 
-        # add model EMA
         kwargs = {
-            'trainer': weakref.proxy(self),
+            "trainer": weakref.proxy(self),
         }
-        # kwargs.update(model_ema.may_get_ema_checkpointer(cfg, model)) TODO: release ema training for large models
         self.checkpointer = DetectionCheckpointer(
-            # Assume you want to save checkpoints together with logs/statistics
             model,
             cfg.OUTPUT_DIR,
             **kwargs,
@@ -197,29 +168,20 @@ class Trainer(DefaultTrainer):
         self.cfg = cfg
 
         self.register_hooks(self.build_hooks())
-        # TODO: release model conversion checkpointer from DINO to MaskDINO
         self.checkpointer = DetectionCheckpointer(
-            # Assume you want to save checkpoints together with logs/statistics
             model,
             cfg.OUTPUT_DIR,
             **kwargs,
         )
-        # TODO: release GPU cluster submit scripts based on submitit for multi-node training
 
     @classmethod
     def build_evaluator(cls, cfg, dataset_name, output_folder=None):
-        """
-        Create evaluator(s) for a given dataset.
-        This uses the special metadata "evaluator_type" associated with each
-        builtin dataset. For your own dataset, you can simply create an
-        evaluator manually in your script and do not have to worry about the
-        hacky if-else logic here.
-        """
         if output_folder is None:
             output_folder = os.path.join(cfg.OUTPUT_DIR, "inference")
         evaluator_list = []
         evaluator_type = MetadataCatalog.get(dataset_name).evaluator_type
-        # semantic segmentation
+
+        # 語意分割
         if evaluator_type in ["sem_seg", "ade20k_panoptic_seg"]:
             evaluator_list.append(
                 SemSegEvaluator(
@@ -228,12 +190,17 @@ class Trainer(DefaultTrainer):
                     output_dir=output_folder,
                 )
             )
-        # instance segmentation
-        if evaluator_type == "coco":
-            evaluator_list.append(MyCOCOEvaluator(dataset_name, output_dir=output_folder))
-        # if evaluator_type == "coco":
-        #     evaluator_list.append(COCOEvaluator(dataset_name, output_dir=output_folder))
-        # panoptic segmentation
+
+        # 🟢 關鍵修正：【強制覆蓋條款】只要任務符合 coco 類型，全部強行注入 MyCOCOEvaluator
+        if evaluator_type in ["coco", "coco_panoptic_seg"]:
+            print(
+                f"\n>>>> [Trainer Override] Injecting MyCOCOEvaluator for {dataset_name} (type: {evaluator_type}) <<<<\n"
+            )
+            evaluator_list.append(
+                MyCOCOEvaluator(dataset_name, output_dir=output_folder)
+            )
+
+        # 全景分割附屬邏輯
         if evaluator_type in [
             "coco_panoptic_seg",
             "ade20k_panoptic_seg",
@@ -241,17 +208,37 @@ class Trainer(DefaultTrainer):
             "mapillary_vistas_panoptic_seg",
         ]:
             if cfg.MODEL.MaskDINO.TEST.PANOPTIC_ON:
-                evaluator_list.append(COCOPanopticEvaluator(dataset_name, output_folder))
-        # COCO
-        if evaluator_type == "coco_panoptic_seg" and cfg.MODEL.MaskDINO.TEST.INSTANCE_ON:
-            evaluator_list.append(COCOEvaluator(dataset_name, output_dir=output_folder))
-        if evaluator_type == "coco_panoptic_seg" and cfg.MODEL.MaskDINO.TEST.SEMANTIC_ON:
-            evaluator_list.append(SemSegEvaluator(dataset_name, distributed=True, output_dir=output_folder))
+                evaluator_list.append(
+                    COCOPanopticEvaluator(dataset_name, output_folder)
+                )
+
+        # 移除原本在這裡單獨附加原生 COCOEvaluator 的邏輯，避免衝突覆蓋
+        if (
+            evaluator_type == "coco_panoptic_seg"
+            and cfg.MODEL.MaskDINO.TEST.SEMANTIC_ON
+        ):
+            evaluator_list.append(
+                SemSegEvaluator(
+                    dataset_name, distributed=True, output_dir=output_folder
+                )
+            )
         # Mapillary Vistas
-        if evaluator_type == "mapillary_vistas_panoptic_seg" and cfg.MODEL.MaskDINO.TEST.INSTANCE_ON:
-            evaluator_list.append(InstanceSegEvaluator(dataset_name, output_dir=output_folder))
-        if evaluator_type == "mapillary_vistas_panoptic_seg" and cfg.MODEL.MaskDINO.TEST.SEMANTIC_ON:
-            evaluator_list.append(SemSegEvaluator(dataset_name, distributed=True, output_dir=output_folder))
+        if (
+            evaluator_type == "mapillary_vistas_panoptic_seg"
+            and cfg.MODEL.MaskDINO.TEST.INSTANCE_ON
+        ):
+            evaluator_list.append(
+                InstanceSegEvaluator(dataset_name, output_dir=output_folder)
+            )
+        if (
+            evaluator_type == "mapillary_vistas_panoptic_seg"
+            and cfg.MODEL.MaskDINO.TEST.SEMANTIC_ON
+        ):
+            evaluator_list.append(
+                SemSegEvaluator(
+                    dataset_name, distributed=True, output_dir=output_folder
+                )
+            )
         # Cityscapes
         if evaluator_type == "cityscapes_instance":
             assert (
@@ -275,16 +262,20 @@ class Trainer(DefaultTrainer):
                 ), "CityscapesEvaluator currently do not work with multiple machines."
                 evaluator_list.append(CityscapesInstanceEvaluator(dataset_name))
         # ADE20K
-        if evaluator_type == "ade20k_panoptic_seg" and cfg.MODEL.MaskDINO.TEST.INSTANCE_ON:
-            evaluator_list.append(InstanceSegEvaluator(dataset_name, output_dir=output_folder))
+        if (
+            evaluator_type == "ade20k_panoptic_seg"
+            and cfg.MODEL.MaskDINO.TEST.INSTANCE_ON
+        ):
+            evaluator_list.append(
+                InstanceSegEvaluator(dataset_name, output_dir=output_folder)
+            )
         # LVIS
         if evaluator_type == "lvis":
             return LVISEvaluator(dataset_name, output_dir=output_folder)
+
         if len(evaluator_list) == 0:
             raise NotImplementedError(
-                "no Evaluator for the dataset {} with the type {}".format(
-                    dataset_name, evaluator_type
-                )
+                f"no Evaluator for the dataset {dataset_name} with the type {evaluator_type}"
             )
         elif len(evaluator_list) == 1:
             return evaluator_list[0]
@@ -292,23 +283,134 @@ class Trainer(DefaultTrainer):
 
     @classmethod
     def build_train_loader(cls, cfg):
-        # coco instance segmentation lsj new baseline
         if cfg.INPUT.DATASET_MAPPER_NAME == "hubmap":
+            from datasets.register_hubmap import HuBMAPDatasetMapper
+            from detectron2.data import get_detection_dataset_dicts
+            from torch.utils.data import Sampler, Dataset
+            import itertools
+            import random
+
             mapper = HuBMAPDatasetMapper(cfg, is_train=True)
-            return build_detection_train_loader(cfg, mapper=mapper)
-        # coco instance segmentation lsj new baseline
+            dataset_names = cfg.DATASETS.TRAIN
+
+            # ─── 🟢 情況 A：如果只有一個資料集 ─────────────────────────────────
+            if len(dataset_names) == 1:
+                print(
+                    f"\n>>>> [Data Loader] Single dataset mode enabled for: {dataset_names[0]} <<<<\n"
+                )
+                dicts_ds = get_detection_dataset_dicts([dataset_names[0]])
+
+                class SingleDatasetWrapper(Dataset):
+                    def __init__(self, ds, mapper):
+                        self.ds = ds
+                        self.mapper = mapper
+
+                    def __getitem__(self, idx):
+                        return self.mapper(self.ds[idx])
+
+                    def __len__(self):
+                        return len(self.ds)
+
+                class InfiniteSingleSampler(Sampler):
+                    def __init__(self, length, batch_size):
+                        self.length = length
+                        self.batch_size = batch_size
+
+                    def __iter__(self):
+                        idx_range = list(range(self.length))
+                        while True:
+                            shuffled = random.sample(idx_range, len(idx_range))
+                            yield from shuffled
+
+                    def __len__(self):
+                        return 99999999
+
+                dataset = SingleDatasetWrapper(dicts_ds, mapper)
+                sampler = InfiniteSingleSampler(len(dicts_ds), cfg.SOLVER.IMS_PER_BATCH)
+
+            # ─── 🟡 情況 B：如果有兩個資料集（走原本的 1:3 比例混合） ──────────────
+            else:
+                print(
+                    f"\n>>>> [Data Loader] Multi-source ratio mode enabled (1:3) for: {dataset_names} <<<<\n"
+                )
+                dicts_ds1 = get_detection_dataset_dicts([dataset_names[0]])
+                dicts_ds2 = get_detection_dataset_dicts([dataset_names[1]])
+
+                class MaskDINOTrainDataset(Dataset):
+                    def __init__(self, ds1, ds2, mapper):
+                        self.ds1 = ds1
+                        self.ds2 = ds2
+                        self.mapper = mapper
+                        self.len_ds1 = len(ds1)
+
+                    def __getitem__(self, idx):
+                        if idx < self.len_ds1:
+                            data_dict = self.ds1[idx]
+                        else:
+                            data_dict = self.ds2[idx - self.len_ds1]
+                        return self.mapper(data_dict)
+
+                    def __len__(self):
+                        return self.len_ds1 + len(self.ds2)
+
+                class CustomRatioSampler(Sampler):
+                    def __init__(self, len_ds1, len_ds2, batch_size, ratio=[1, 3]):
+                        self.len_ds1 = len_ds1
+                        self.len_ds2 = len_ds2
+                        self.batch_size = batch_size
+                        self.ratio = ratio
+                        self.idx_range_ds1 = list(range(0, len_ds1))
+                        self.idx_range_ds2 = list(range(len_ds1, len_ds1 + len_ds2))
+
+                    def __iter__(self):
+                        def infinite_shuffled_generator(idx_range):
+                            while True:
+                                shuffled = random.sample(idx_range, len(idx_range))
+                                for idx in shuffled:
+                                    yield idx
+
+                        iter_ds1 = infinite_shuffled_generator(self.idx_range_ds1)
+                        iter_ds2 = infinite_shuffled_generator(self.idx_range_ds2)
+                        while True:
+                            batch = []
+                            batch.extend([next(iter_ds1) for _ in range(self.ratio[0])])
+                            batch.extend([next(iter_ds2) for _ in range(self.ratio[1])])
+                            yield from batch
+
+                    def __len__(self):
+                        return 99999999
+
+                dataset = MaskDINOTrainDataset(dicts_ds1, dicts_ds2, mapper)
+                sampler = CustomRatioSampler(
+                    len(dicts_ds1),
+                    len(dicts_ds2),
+                    cfg.SOLVER.IMS_PER_BATCH,
+                    ratio=[1, 3],
+                )
+
+            # ─── 共通的 DataLoader 回傳 ──────────────────────────────────────
+            from detectron2.data.build import worker_init_reset_seed
+            from torch.utils.data import DataLoader
+
+            return DataLoader(
+                dataset,
+                batch_size=cfg.SOLVER.IMS_PER_BATCH,
+                sampler=sampler,
+                num_workers=0,
+                collate_fn=lambda x: x,
+                worker_init_fn=worker_init_reset_seed,
+                pin_memory=True,
+            )
+
         if cfg.INPUT.DATASET_MAPPER_NAME == "coco_instance_lsj":
             mapper = COCOInstanceNewBaselineDatasetMapper(cfg, True)
             return build_detection_train_loader(cfg, mapper=mapper)
-        # coco instance segmentation lsj new baseline
         elif cfg.INPUT.DATASET_MAPPER_NAME == "coco_instance_detr":
             mapper = DetrDatasetMapper(cfg, True)
             return build_detection_train_loader(cfg, mapper=mapper)
-        # coco panoptic segmentation lsj new baseline
         elif cfg.INPUT.DATASET_MAPPER_NAME == "coco_panoptic_lsj":
             mapper = COCOPanopticNewBaselineDatasetMapper(cfg, True)
             return build_detection_train_loader(cfg, mapper=mapper)
-        # Semantic segmentation dataset mapper
         elif cfg.INPUT.DATASET_MAPPER_NAME == "mask_former_semantic":
             mapper = MaskFormerSemanticDatasetMapper(cfg, True)
             return build_detection_train_loader(cfg, mapper=mapper)
@@ -318,10 +420,6 @@ class Trainer(DefaultTrainer):
 
     @classmethod
     def build_lr_scheduler(cls, cfg, optimizer):
-        """
-        It now calls :func:`detectron2.solver.build_lr_scheduler`.
-        Overwrite it if you'd like a different scheduler.
-        """
         return build_lr_scheduler(cfg, optimizer)
 
     @classmethod
@@ -329,16 +427,13 @@ class Trainer(DefaultTrainer):
         weight_decay_norm = cfg.SOLVER.WEIGHT_DECAY_NORM
         weight_decay_embed = cfg.SOLVER.WEIGHT_DECAY_EMBED
 
-        defaults = {}
-        defaults["lr"] = cfg.SOLVER.BASE_LR
-        defaults["weight_decay"] = cfg.SOLVER.WEIGHT_DECAY
+        defaults = {"lr": cfg.SOLVER.BASE_LR, "weight_decay": cfg.SOLVER.WEIGHT_DECAY}
 
         norm_module_types = (
             torch.nn.BatchNorm1d,
             torch.nn.BatchNorm2d,
             torch.nn.BatchNorm3d,
             torch.nn.SyncBatchNorm,
-            # NaiveSyncBatchNorm inherits from BatchNorm2d
             torch.nn.GroupNorm,
             torch.nn.InstanceNorm1d,
             torch.nn.InstanceNorm2d,
@@ -351,21 +446,19 @@ class Trainer(DefaultTrainer):
         memo: Set[torch.nn.parameter.Parameter] = set()
         for module_name, module in model.named_modules():
             for module_param_name, value in module.named_parameters(recurse=False):
-                if not value.requires_grad:
-                    continue
-                # Avoid duplicating parameters
-                if value in memo:
+                if not value.requires_grad or value in memo:
                     continue
                 memo.add(value)
 
                 hyperparams = copy.copy(defaults)
                 if "backbone" in module_name:
-                    hyperparams["lr"] = hyperparams["lr"] * cfg.SOLVER.BACKBONE_MULTIPLIER
+                    hyperparams["lr"] = (
+                        hyperparams["lr"] * cfg.SOLVER.BACKBONE_MULTIPLIER
+                    )
                 if (
                     "relative_position_bias_table" in module_param_name
                     or "absolute_pos_embed" in module_param_name
                 ):
-                    print(module_param_name)
                     hyperparams["weight_decay"] = 0.0
                 if isinstance(module, norm_module_types):
                     hyperparams["weight_decay"] = weight_decay_norm
@@ -374,7 +467,6 @@ class Trainer(DefaultTrainer):
                 params.append({"params": [value], **hyperparams})
 
         def maybe_add_full_model_gradient_clipping(optim):
-            # detectron2 doesn't have full model gradient clipping now
             clip_norm_val = cfg.SOLVER.CLIP_GRADIENTS.CLIP_VALUE
             enable = (
                 cfg.SOLVER.CLIP_GRADIENTS.ENABLED
@@ -384,7 +476,9 @@ class Trainer(DefaultTrainer):
 
             class FullModelGradientClippingOptimizer(optim):
                 def step(self, closure=None):
-                    all_params = itertools.chain(*[x["params"] for x in self.param_groups])
+                    all_params = itertools.chain(
+                        *[x["params"] for x in self.param_groups]
+                    )
                     torch.nn.utils.clip_grad_norm_(all_params, clip_norm_val)
                     super().step(closure=closure)
 
@@ -408,7 +502,6 @@ class Trainer(DefaultTrainer):
     @classmethod
     def test_with_TTA(cls, cfg, model):
         logger = logging.getLogger("detectron2.trainer")
-        # In the end of training, run an evaluation with TTA.
         logger.info("Running inference with test-time augmentation ...")
         model = SemanticSegmentorWithTTA(cfg, model)
         evaluators = [
@@ -420,45 +513,48 @@ class Trainer(DefaultTrainer):
         res = cls.test(cfg, model, evaluators)
         res = OrderedDict({k + "_TTA": v for k, v in res.items()})
         return res
-    
+
     def build_hooks(self):
         cfg = self.cfg.clone()
         cfg.defrost()
-        
-        # 1. 取得 DefaultTrainer 預設會註冊的所有 Hook
         ret = super().build_hooks()
-        
-        # 2. 定義你要監控的自訂指標 (看你是想依據 bbox 還是 segm 的 AP60，以下用實體分割 segm 為例)
-        # 注意：這個字串必須跟剛才 MyCOCOEvaluator 塞進 metrics 的 key 完全一致
-        target_metric = "segm/blood_vessel_AP60" 
-        
-        # 3. 註冊 BestCheckpointer Hook
-        # 當每次 Evaluation 結束後，此 Hook 會檢查 target_metric 是否突破新高，若是則存成 best.pth
+
+        # 🔍 暫時用這個 hook 印出所有 storage key，確認格式
+        class DebugMetricHook(hooks.HookBase):
+            def after_step(self):
+                storage = self.trainer.storage
+                # 只在 eval 剛跑完後的 iteration 印
+                if hasattr(storage, "_latest_scalars"):
+                    keys = list(storage._latest_scalars.keys())
+                    ap60_keys = [k for k in keys if "AP60" in k or "blood" in k]
+                    if ap60_keys:
+                        print(f"\n🔍 [DEBUG] Found AP60-related keys: {ap60_keys}")
+
+        ret.append(DebugMetricHook())
+
+        target_metric = "segm/blood_vessel_AP60"
         best_blv_hook = hooks.BestCheckpointer(
             eval_period=cfg.TEST.EVAL_PERIOD,
             checkpointer=self.checkpointer,
             val_metric=target_metric,
-            mode="max",                  # 越高越好
-            file_prefix="best"           # 這會自動存成 "best.pth"
+            mode="max",
+            file_prefix="best",
         )
-        
         ret.append(best_blv_hook)
         return ret
 
 
 def setup(args):
-    """
-    Create configs and perform basic setups.
-    """
     cfg = get_cfg()
-    # for poly lr schedule
     add_deeplab_config(cfg)
     add_dimaskdino_config(cfg)
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
     cfg.freeze()
     default_setup(cfg, args)
-    setup_logger(output=cfg.OUTPUT_DIR, distributed_rank=comm.get_rank(), name="maskdino")
+    setup_logger(
+        output=cfg.OUTPUT_DIR, distributed_rank=comm.get_rank(), name="maskdino"
+    )
     return cfg
 
 
@@ -471,9 +567,7 @@ def main(args):
             cfg.MODEL.WEIGHTS, resume=args.resume
         )
         checkpointer = DetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR)
-        checkpointer.resume_or_load(
-            cfg.MODEL.WEIGHTS, resume=args.resume
-        )
+        checkpointer.resume_or_load(cfg.MODEL.WEIGHTS, resume=args.resume)
         res = Trainer.test(cfg, model)
         if cfg.TEST.AUG.ENABLED:
             res.update(Trainer.test_with_TTA(cfg, model))
@@ -488,12 +582,12 @@ def main(args):
 
 if __name__ == "__main__":
     parser = default_argument_parser()
-    parser.add_argument('--eval_only', action='store_true')
-    parser.add_argument('--EVAL_FLAG', type=int, default=1)
+    parser.add_argument("--eval_only", action="store_true")
+    parser.add_argument("--EVAL_FLAG", type=int, default=1)
     args = parser.parse_args()
-    # random port
+
     port = random.randint(1000, 20000)
-    args.dist_url = 'tcp://127.0.0.1:' + str(port)
+    args.dist_url = "tcp://127.0.0.1:" + str(port)
     print("Command Line Args:", args)
     print("pwd:", os.getcwd())
     launch(

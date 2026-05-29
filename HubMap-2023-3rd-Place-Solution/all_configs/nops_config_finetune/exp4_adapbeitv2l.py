@@ -253,7 +253,7 @@ model = dict(
             mask_thr_binary=0.5)))
 
 data_root = '/home/cvml-3/yy/114_2/HubMap/HubMap-2023-3rd-Place-Solution/hubmap-hacking-the-human-vasculature'
-metainfo = dict(classes=('blood_vessel', ), palette=[(220, 20, 60)])
+metainfo = dict(classes=('blood_vessels', ), palette=[(220, 20, 60)])
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 img_size = 1400

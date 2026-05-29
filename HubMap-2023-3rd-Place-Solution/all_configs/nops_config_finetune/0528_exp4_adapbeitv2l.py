@@ -48,15 +48,13 @@ model = dict(
             with_cp=True,
             ffn_ratio=4.0,
             drop_path=0.1),
+        # ─── [MODIFIED] 將原先的 FPN 升級為 PAFPN ───
         dict(
-            type='FPN',
+            type='PAFPN',
             in_channels=[1024, 1024, 1024, 1024],
             norm_cfg=dict(type='GN', num_groups=32),
             out_channels=256,
-            num_outs=5,
-            add_extra_convs='on_output',
-            relu_before_extra_convs=True,
-        )
+            num_outs=5)  # 拔除不支援的 add_extra_convs 與 relu_before_extra_convs
     ],
     rpn_head=dict(
         type='RPNHead',
@@ -81,27 +79,6 @@ model = dict(
         mask_info_flow=True,
         num_stages=3,
         stage_loss_weights=[1, 0.75, 0.5],
-
-        # ── semantic branch ──
-        # semantic_roi_extractor=dict(
-        #     type='SingleRoIExtractor',
-        #     roi_layer=dict(type='RoIAlign', output_size=14, sampling_ratio=2),
-        #     out_channels=256,
-        #     featmap_strides=[8]),
-        # semantic_head=dict(
-        #     type='FusedSemanticHead',
-        #     num_ins=5,
-        #     fusion_level=1,
-        #     num_convs=4,
-        #     in_channels=256,
-        #     conv_out_channels=256,
-        #     num_classes=2,
-        #     loss_seg=dict(
-        #         type='CrossEntropyLoss',
-        #         ignore_index=255,
-        #         loss_weight=0.2)),
-        # ────────────────────
-
         bbox_roi_extractor=dict(
             type='SingleRoIExtractor',
             roi_layer=dict(type='RoIAlign', output_size=7, sampling_ratio=2),
@@ -260,12 +237,7 @@ model = dict(
                 mask_size=28,
                 pos_weight=-1,
                 debug=False),
-        ],
-        # semantic=dict(
-        #     num_things_classes=1,
-        #     num_stuff_classes=0,
-        #     semantic_loss_weight=0.2)
-        ),
+        ]),
     test_cfg=dict(
         rpn=dict(
             nms_pre=1000,
@@ -297,10 +269,9 @@ albu_train_transforms = [
     dict(type='GaussianBlur', blur_limit=(3, 5), p=0.2),
 ]
 
-# [FIX] 統一 train_pipeline，補回 with_seg=True、SegRescale、gt_semantic_seg
 train_pipeline = [
     dict(type='LoadImageFromFile'),
-    dict(type='LoadAnnotations', with_bbox=True, with_mask=True,),  # [FIX]
+    dict(type='LoadAnnotations', with_bbox=True, with_mask=True,),
     dict(type='Resize', 
          img_scale=[(1400, 1400)], 
          multiscale_mode='value', 
@@ -350,10 +321,8 @@ train_pipeline = [
         std=[58.395, 57.12, 57.375],
         to_rgb=True),
     dict(type='Pad', size_divisor=32),
-    # dict(type='SegRescale', scale_factor=1 / 8),   # [FIX]
     dict(type='DefaultFormatBundle'),
-    dict(type='Collect',
-         keys=['img', 'gt_bboxes', 'gt_labels', 'gt_masks']),  # [FIX]
+    dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_labels', 'gt_masks']),
 ]
 
 test_pipeline = [
@@ -390,8 +359,7 @@ data = dict(
         classes=('blood_vessels', ),
         ann_file='coco_data/coco/ds1_coco_1024_train_all_fold1.json',
         img_prefix='train/',
-        # seg_prefix='semantic_masks/',   # [FIX] 補回 seg_prefix
-        pipeline=train_pipeline),       # [FIX] 使用統一的 train_pipeline
+        pipeline=train_pipeline),
     val=dict(
         type='CocoDataset',
         data_root=data_root,
@@ -421,7 +389,7 @@ lr_config = dict(
     min_lr=1e-08)
 
 evaluation = dict(interval=1, metric=['segm'], save_best='segm_mAP')
-runner = dict(type='EpochBasedRunner', max_epochs=40)
+runner = dict(type='EpochBasedRunner', max_epochs=30)
 checkpoint_config = dict(interval=-1, filename_tmpl='detectors_epoch_{}.pth')
 log_config = dict(interval=20, hooks=[dict(type='TextLoggerHook')])
 fp16 = None
