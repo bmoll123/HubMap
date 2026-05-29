@@ -7,13 +7,21 @@ export PYTHONPATH="$(cd "$(dirname "$0")" && pwd)/..":$PYTHONPATH
 GPU_ID=0
 
 # 定義你的訓練指令（已修正末尾換行）
-CMD1="python train.py \
-    all_configs/pretconf/pretexp1_adaplargebeitv2l_htc-v2_consistency.py \
-    --launcher none --seed 69"
+CMD1="python train_cps.py \
+  --cfg-vit all_configs/pretconf/pretexp1_adaplargebeitv2l_htc-v2.py \
+  --cfg-cnn all_configs/nops_config_pret/htc_resnext101_cps.py \
+  --ckpt-vit results/stage1/best_segm_mAP_epoch_8.pth \
+  --ckpt-cnn hubmap-coco-pretrained-models/detec_htcres101x32_pretcoco.pth \
+  --work-dir results/cps/stage1"
 
-CMD2="python train.py \
-    all_configs/nops_config_finetune/exp4_adapbeitv2l_consistency.py \
-    --launcher none --seed 69"
+CMD2="python train_cps.py \
+  --cfg-vit all_configs/nops_config_finetune/exp4_adapbeitv2l.py \
+  --cfg-cnn all_configs/nops_config_finetune/pretwsiallhtc_resnext101_exp3_augv4_maskloss4.py \
+  --ckpt-vit results/cps/stage1/vit_epoch_8.pth \
+  --ckpt-cnn results/cps/stage1/cnn_epoch_8.pth \
+  --unl-ann-file hubmap-hacking-the-human-vasculature/coco_data/coco/ds2wsiall_coco_1024_train_fold1.json \
+  --max-epochs 23 \
+  --work-dir results/cps/stage2"
 
 echo "=== 開始執行第一個訓練任務 ==="
 CUDA_VISIBLE_DEVICES=$GPU_ID $CMD1
