@@ -25,6 +25,7 @@
 import argparse
 import copy
 import logging
+import math
 import os
 import warnings
 
@@ -32,13 +33,12 @@ warnings.filterwarnings("ignore", category=UserWarning,
                         message="On January 1, 2023, MMCV will release v2.0.0*")
 
 import mmcv
-import mmcv_custom   # noqa: F401 — 注冊自訂 mmcv 修補
-import mmdet_custom  # noqa: F401 — 注冊自訂模組 (BEiTAdapter, LNNHopfieldFPN 等)
+import mmcv_custom
+import mmdet_custom
 import numpy as np
 import torch
-import torch.nn.functional as F
 from mmcv import Config
-from mmcv.runner import build_optimizer, load_checkpoint, wrap_fp16_model
+from mmcv.runner import build_optimizer, load_checkpoint
 from mmdet.apis import set_random_seed
 from mmdet.core import BitmapMasks
 from mmdet.datasets import build_dataloader, build_dataset
@@ -209,10 +209,53 @@ def build_unlabeled_loader(cfg_vit: Config, unl_ann_file: str, workers: int = 2)
         dict(type='Collect', keys=['img']),
     ]
 
-    unl_cfg            = copy.deepcopy(cfg_vit.data.train)
-    unl_cfg.ann_file   = unl_ann_file
-    unl_cfg.pipeline   = unl_pipeline
-    unl_cfg.pop('data_root', None)  # ann_file 已是完整路徑
+    unl_cfg = copy.deepcopy(cfg_vit.data.train)
+    unl_cfg.pipeline = unl_pipeline
+
+    # Keep data_root/img_prefix semantics consistent with CocoDataset.
+    data_root = unl_cfg.get('data_root', None)
+    if data_root is None:
+        data_root = cfg_vit.get('data_root', None)
+
+    if data_root is not None:
+        unl_cfg.data_root = data_root
+
+        root_norm = os.path.normpath(str(data_root))
+        root_name = os.path.basename(root_norm)
+
+        # Convert ann_file to a path relative to data_root when possible.
+        if os.path.isabs(unl_ann_file):
+            ann_abs = os.path.abspath(unl_ann_file)
+            root_abs = os.path.abspath(str(data_root))
+            if os.path.commonpath([root_abs, ann_abs]) == root_abs:
+                unl_cfg.ann_file = os.path.relpath(ann_abs, root_abs)
+            else:
+                unl_cfg.ann_file = ann_abs
+        else:
+            ann_rel = os.path.normpath(unl_ann_file)
+            if ann_rel == root_name or ann_rel.startswith(root_name + os.sep):
+                ann_rel = os.path.relpath(ann_rel, root_name)
+            unl_cfg.ann_file = ann_rel
+
+        # Normalize img_prefix in the same way to avoid data_root duplication.
+        if 'img_prefix' in unl_cfg and isinstance(unl_cfg.img_prefix, str):
+            if os.path.isabs(unl_cfg.img_prefix):
+                img_abs = os.path.abspath(unl_cfg.img_prefix)
+                root_abs = os.path.abspath(str(data_root))
+                if os.path.commonpath([root_abs, img_abs]) == root_abs:
+                    unl_cfg.img_prefix = os.path.relpath(img_abs, root_abs)
+                else:
+                    unl_cfg.img_prefix = img_abs
+            else:
+                img_rel = os.path.normpath(unl_cfg.img_prefix)
+                if img_rel == root_name or img_rel.startswith(root_name + os.sep):
+                    img_rel = os.path.relpath(img_rel, root_name)
+                unl_cfg.img_prefix = img_rel
+    else:
+        # Fallback to absolute ann_file and absolute img_prefix if no data_root exists.
+        unl_cfg.ann_file = os.path.abspath(unl_ann_file)
+        if 'img_prefix' in unl_cfg and not os.path.isabs(unl_cfg.img_prefix):
+            unl_cfg.img_prefix = os.path.abspath(unl_cfg.img_prefix)
 
     unl_dataset = build_dataset(unl_cfg)
     unl_loader  = build_dataloader(
@@ -229,6 +272,7 @@ def build_unlabeled_loader(cfg_vit: Config, unl_ann_file: str, workers: int = 2)
 def setup_logger(log_path: str) -> logging.Logger:
     logger = logging.getLogger('cps_train')
     logger.setLevel(logging.INFO)
+    logger.propagate = False
     if not logger.handlers:
         fh = logging.FileHandler(log_path)
         fh.setFormatter(logging.Formatter('%(asctime)s  %(message)s',
@@ -240,9 +284,63 @@ def setup_logger(log_path: str) -> logging.Logger:
     return logger
 
 
-def save_ckpt(model, path: str, meta: dict):
+def save_ckpt(model, optimizer, scaler, path: str, meta: dict):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    torch.save({'state_dict': model.state_dict(), 'meta': meta}, path)
+    torch.save(
+        {
+            'state_dict': model.state_dict(),
+            'optimizer': optimizer.state_dict() if optimizer is not None else None,
+            'scaler': scaler.state_dict() if scaler is not None else None,
+            'meta': meta,
+        },
+        path,
+    )
+
+
+def _build_iter_lr_scheduler(optimizer, base_lrs, lr_cfg, max_iters: int):
+    """Create a closure that updates optimizer lr at each iter.
+
+    Supports commonly used MMDet style configs in this repo:
+      - policy='CosineAnnealing'
+      - warmup='linear' with warmup_iters / warmup_ratio
+      - min_lr
+    """
+    if lr_cfg is None:
+        def _noop(_iter_idx: int):
+            return
+        return _noop
+
+    policy = lr_cfg.get('policy', 'CosineAnnealing')
+    warmup = lr_cfg.get('warmup', None)
+    warmup_iters = int(lr_cfg.get('warmup_iters', 0))
+    warmup_ratio = float(lr_cfg.get('warmup_ratio', 0.1))
+    min_lr = float(lr_cfg.get('min_lr', 0.0))
+
+    def _set_lr(scale_fn):
+        for pg, base_lr in zip(optimizer.param_groups, base_lrs):
+            pg['lr'] = scale_fn(base_lr)
+
+    def _step(iter_idx: int):
+        # iter_idx: 0-based global iter
+        if warmup == 'linear' and warmup_iters > 0 and iter_idx < warmup_iters:
+            alpha = float(iter_idx + 1) / float(warmup_iters)
+            scale = warmup_ratio + (1.0 - warmup_ratio) * alpha
+            _set_lr(lambda b: b * scale)
+            return
+
+        if policy == 'CosineAnnealing':
+            if max_iters <= 1:
+                progress = 1.0
+            else:
+                progress = min(max(iter_idx, 0), max_iters - 1) / float(max_iters - 1)
+
+            _set_lr(lambda b: min_lr + 0.5 * (b - min_lr) * (1.0 + math.cos(math.pi * progress)))
+            return
+
+        # Fallback: keep constant lr if policy is unsupported.
+        _set_lr(lambda b: b)
+
+    return _step
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -285,11 +383,11 @@ def main():
                         revise_keys=[(r'^module\.', '')])
         logger.info(f'[init] CNN 載入 {args.ckpt_cnn}')
 
-    # FP16（與原始 config fp16 設定一致）
-    if cfg_vit.get('fp16') is not None:
-        wrap_fp16_model(model_vit)
-    if cfg_cnn.get('fp16') is not None:
-        wrap_fp16_model(model_cnn)
+    # AMP（與原始 config 的 fp16 開關對齊）
+    use_amp_vit = cfg_vit.get('fp16') is not None
+    use_amp_cnn = cfg_cnn.get('fp16') is not None
+    scaler_vit = torch.cuda.amp.GradScaler(enabled=use_amp_vit)
+    scaler_cnn = torch.cuda.amp.GradScaler(enabled=use_amp_cnn)
 
     model_vit = model_vit.to('cuda:0').train()
     model_cnn = model_cnn.to('cuda:1').train()
@@ -317,41 +415,78 @@ def main():
         drop_last=True,
     )
 
+    # ── 建立 LR scheduler（iter-based）────────────────────────────────────────
+    total_train_iters = args.max_epochs * len(lab_loader)
+    base_lrs_vit = [pg['lr'] for pg in opt_vit.param_groups]
+    base_lrs_cnn = [pg['lr'] for pg in opt_cnn.param_groups]
+    step_lr_vit = _build_iter_lr_scheduler(opt_vit, base_lrs_vit, cfg_vit.get('lr_config', None), total_train_iters)
+    step_lr_cnn = _build_iter_lr_scheduler(opt_cnn, base_lrs_cnn, cfg_cnn.get('lr_config', None), total_train_iters)
+
     # unlabeled set
-    unl_ann = (args.unl_ann_file
-               or os.path.join(cfg_vit.data_root,
-                               cfg_vit.data.train.ann_file))
+    train_data_root = cfg_vit.data.train.get('data_root', None)
+    if train_data_root is None:
+        train_data_root = cfg_vit.get('data_root', None)
+
+    if args.unl_ann_file:
+        unl_ann = args.unl_ann_file
+    else:
+        if train_data_root is not None:
+            unl_ann = os.path.join(train_data_root, cfg_vit.data.train.ann_file)
+        else:
+            unl_ann = cfg_vit.data.train.ann_file
     logger.info(f'[data] unlabeled ann_file = {unl_ann}')
     unl_loader = build_unlabeled_loader(
         cfg_vit, unl_ann,
         workers=cfg_vit.data.workers_per_gpu,
     )
 
-    # val set（用 ViT 的 val set 做 epoch 結束時的快速參考）
-    val_dataset = build_dataset(cfg_vit.data.val, dict(test_mode=True))
-    val_loader  = build_dataloader(
-        val_dataset,
-        samples_per_gpu=1,
-        workers_per_gpu=cfg_vit.data.workers_per_gpu,
-        dist=False,
-        shuffle=False,
-    )
-    logger.info(f'[data] labeled={len(lab_dataset)} | unlabeled={len(unl_loader.dataset)} | val={len(val_dataset)}')
+    logger.info(f'[data] labeled={len(lab_dataset)} | unlabeled={len(unl_loader.dataset)}')
 
     # ── Resume ────────────────────────────────────────────────────────────────
     start_epoch = 0
+    total_iters = 0
+    resume_epoch_vit = None
+    resume_epoch_cnn = None
+
     if args.resume_vit and os.path.exists(args.resume_vit):
         ck = torch.load(args.resume_vit, map_location='cpu')
         model_vit.load_state_dict(ck['state_dict'], strict=False)
-        start_epoch = ck.get('meta', {}).get('epoch', 0)
-        logger.info(f'[resume] ViT 恢復，起始 epoch = {start_epoch}')
+        if ck.get('optimizer') is not None:
+            opt_vit.load_state_dict(ck['optimizer'])
+        if ck.get('scaler') is not None:
+            scaler_vit.load_state_dict(ck['scaler'])
+        resume_epoch_vit = ck.get('meta', {}).get('epoch', 0)
+        total_iters = max(total_iters, ck.get('meta', {}).get('iter', 0))
+        logger.info(f'[resume] ViT 恢復，checkpoint epoch = {resume_epoch_vit}')
+
     if args.resume_cnn and os.path.exists(args.resume_cnn):
         ck = torch.load(args.resume_cnn, map_location='cpu')
         model_cnn.load_state_dict(ck['state_dict'], strict=False)
-        logger.info(f'[resume] CNN 恢復')
+        if ck.get('optimizer') is not None:
+            opt_cnn.load_state_dict(ck['optimizer'])
+        if ck.get('scaler') is not None:
+            scaler_cnn.load_state_dict(ck['scaler'])
+        resume_epoch_cnn = ck.get('meta', {}).get('epoch', 0)
+        total_iters = max(total_iters, ck.get('meta', {}).get('iter', 0))
+        logger.info(f'[resume] CNN 恢復，checkpoint epoch = {resume_epoch_cnn}')
+
+    if resume_epoch_vit is not None or resume_epoch_cnn is not None:
+        if resume_epoch_vit is None:
+            start_epoch = int(resume_epoch_cnn)
+        elif resume_epoch_cnn is None:
+            start_epoch = int(resume_epoch_vit)
+        else:
+            if int(resume_epoch_vit) != int(resume_epoch_cnn):
+                logger.warning(
+                    '[resume] ViT/CNN epoch 不一致：vit=%s, cnn=%s，使用較小值以避免越界',
+                    resume_epoch_vit,
+                    resume_epoch_cnn,
+                )
+            start_epoch = min(int(resume_epoch_vit), int(resume_epoch_cnn))
+
+        logger.info(f'[resume] 共同起始 epoch = {start_epoch}, iter = {total_iters}')
 
     # ── 訓練主迴圈 ────────────────────────────────────────────────────────────
-    total_iters = 0
     best_metric = 0.0   # 留給未來整合 evaluation hook
 
     for epoch in range(start_epoch, args.max_epochs):
@@ -387,18 +522,23 @@ def main():
             # Part A：更新 ViT（cuda:0）
             #   supervised loss  +  λ × CPS loss（from CNN pseudo）
             # ==================================================================
-            opt_vit.zero_grad()
+            # iter-based lr scheduling
+            step_lr_vit(total_iters)
+            step_lr_cnn(total_iters)
+
+            opt_vit.zero_grad(set_to_none=True)
 
             # A1. Supervised loss
-            losses_vit_sup = model_vit(
-                return_loss=True,
-                img=img_lab.to('cuda:0'),
-                img_metas=metas_lab,
-                gt_bboxes=[b.to('cuda:0') for b in gt_bboxes],
-                gt_labels=[l.to('cuda:0') for l in gt_labels],
-                gt_masks=gt_masks,
-            )
-            loss_vit_sup = parse_losses(losses_vit_sup)
+            with torch.cuda.amp.autocast(enabled=use_amp_vit):
+                losses_vit_sup = model_vit(
+                    return_loss=True,
+                    img=img_lab.to('cuda:0'),
+                    img_metas=metas_lab,
+                    gt_bboxes=[b.to('cuda:0') for b in gt_bboxes],
+                    gt_labels=[l.to('cuda:0') for l in gt_labels],
+                    gt_masks=gt_masks,
+                )
+                loss_vit_sup = parse_losses(losses_vit_sup)
 
             # A2. CNN pseudo labels（no_grad on cuda:1）
             if lam > 0:
@@ -415,41 +555,45 @@ def main():
                     result_cnn[0], metas_unl, PSEUDO_CONF_THR, 'cuda:0')
 
                 if len(pb) > 0:
-                    losses_vit_cps = model_vit(
-                        return_loss=True,
-                        img=img_unl.to('cuda:0'),
-                        img_metas=metas_unl,
-                        gt_bboxes=[pb],
-                        gt_labels=[pl],
-                        gt_masks=[pm],
-                    )
-                    loss_vit_cps = parse_losses(losses_vit_cps)
+                    with torch.cuda.amp.autocast(enabled=use_amp_vit):
+                        losses_vit_cps = model_vit(
+                            return_loss=True,
+                            img=img_unl.to('cuda:0'),
+                            img_metas=metas_unl,
+                            gt_bboxes=[pb],
+                            gt_labels=[pl],
+                            gt_masks=[pm],
+                        )
+                        loss_vit_cps = parse_losses(losses_vit_cps)
                 else:
                     loss_vit_cps = torch.tensor(0.0, device='cuda:0')
             else:
                 loss_vit_cps = torch.tensor(0.0, device='cuda:0')
 
             loss_vit_total = loss_vit_sup + lam * loss_vit_cps
-            loss_vit_total.backward()
+            scaler_vit.scale(loss_vit_total).backward()
+            scaler_vit.unscale_(opt_vit)
             torch.nn.utils.clip_grad_norm_(model_vit.parameters(), GRAD_CLIP_NORM)
-            opt_vit.step()
+            scaler_vit.step(opt_vit)
+            scaler_vit.update()
 
             # ==================================================================
             # Part B：更新 CNN（cuda:1）
             #   supervised loss  +  λ × CPS loss（from ViT pseudo）
             # ==================================================================
-            opt_cnn.zero_grad()
+            opt_cnn.zero_grad(set_to_none=True)
 
             # B1. Supervised loss
-            losses_cnn_sup = model_cnn(
-                return_loss=True,
-                img=img_lab.to('cuda:1'),
-                img_metas=metas_lab,
-                gt_bboxes=[b.to('cuda:1') for b in gt_bboxes],
-                gt_labels=[l.to('cuda:1') for l in gt_labels],
-                gt_masks=gt_masks,
-            )
-            loss_cnn_sup = parse_losses(losses_cnn_sup)
+            with torch.cuda.amp.autocast(enabled=use_amp_cnn):
+                losses_cnn_sup = model_cnn(
+                    return_loss=True,
+                    img=img_lab.to('cuda:1'),
+                    img_metas=metas_lab,
+                    gt_bboxes=[b.to('cuda:1') for b in gt_bboxes],
+                    gt_labels=[l.to('cuda:1') for l in gt_labels],
+                    gt_masks=gt_masks,
+                )
+                loss_cnn_sup = parse_losses(losses_cnn_sup)
 
             # B2. ViT pseudo labels（no_grad on cuda:0）
             if lam > 0:
@@ -466,24 +610,27 @@ def main():
                     result_vit[0], metas_unl, PSEUDO_CONF_THR, 'cuda:1')
 
                 if len(pb) > 0:
-                    losses_cnn_cps = model_cnn(
-                        return_loss=True,
-                        img=img_unl.to('cuda:1'),
-                        img_metas=metas_unl,
-                        gt_bboxes=[pb],
-                        gt_labels=[pl],
-                        gt_masks=[pm],
-                    )
-                    loss_cnn_cps = parse_losses(losses_cnn_cps)
+                    with torch.cuda.amp.autocast(enabled=use_amp_cnn):
+                        losses_cnn_cps = model_cnn(
+                            return_loss=True,
+                            img=img_unl.to('cuda:1'),
+                            img_metas=metas_unl,
+                            gt_bboxes=[pb],
+                            gt_labels=[pl],
+                            gt_masks=[pm],
+                        )
+                        loss_cnn_cps = parse_losses(losses_cnn_cps)
                 else:
                     loss_cnn_cps = torch.tensor(0.0, device='cuda:1')
             else:
                 loss_cnn_cps = torch.tensor(0.0, device='cuda:1')
 
             loss_cnn_total = loss_cnn_sup + lam * loss_cnn_cps
-            loss_cnn_total.backward()
+            scaler_cnn.scale(loss_cnn_total).backward()
+            scaler_cnn.unscale_(opt_cnn)
             torch.nn.utils.clip_grad_norm_(model_cnn.parameters(), GRAD_CLIP_NORM)
-            opt_cnn.step()
+            scaler_cnn.step(opt_cnn)
+            scaler_cnn.update()
 
             total_iters += 1
 
@@ -495,16 +642,22 @@ def main():
                     f'vit_cps={loss_vit_cps.item():.3f} | '
                     f'cnn_sup={loss_cnn_sup.item():.3f} '
                     f'cnn_cps={loss_cnn_cps.item():.3f} | '
-                    f'λ={lam:.3f}'
+                    f'λ={lam:.3f} | '
+                    f'lr_vit={opt_vit.param_groups[0]["lr"]:.6g} '
+                    f'lr_cnn={opt_cnn.param_groups[0]["lr"]:.6g}'
                 )
 
         # ── 存 checkpoint ─────────────────────────────────────────────────────
         if (epoch + 1) % CKPT_INTERVAL == 0:
             meta = {'epoch': epoch + 1, 'iter': total_iters}
             save_ckpt(model_vit,
+                      opt_vit,
+                      scaler_vit,
                       os.path.join(args.work_dir, f'vit_epoch_{epoch+1}.pth'),
                       meta)
             save_ckpt(model_cnn,
+                      opt_cnn,
+                      scaler_cnn,
                       os.path.join(args.work_dir, f'cnn_epoch_{epoch+1}.pth'),
                       meta)
             logger.info(f'[ckpt] saved epoch {epoch+1}')
