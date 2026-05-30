@@ -25,14 +25,20 @@ pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorc
 pip install "setuptools==69.5.1"
 ```
 
-### Step 4：從原始碼編譯 mmcv-full 1.7.2（本步驟約需 10-20 分鐘）
+### Step 4：從原始碼編譯 mmcv-full 1.7.2（本步驟約需 20-60 分鐘）
 
 > **說明**：PyTorch 2.3.1 + CUDA 12.1 沒有 mmcv-full 1.x 的預建 wheel，必須從原始碼編譯。
+> 若機器同時有多版 CUDA（例如 `/usr/local/cuda` 指到 11.x），請先指定 CUDA 12.x 工具鏈，避免 `The detected CUDA version ... mismatches ...` 錯誤。
 
 ```bash
 cd /tmp
 git clone -b v1.7.2 https://github.com/open-mmlab/mmcv.git mmcv-1.7.2 --depth=1
 cd mmcv-1.7.2
+export CUDA_HOME=/usr/local/cuda-12.4
+export PATH=$CUDA_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}
+export TORCH_CUDA_ARCH_LIST="8.9"
+export MAX_JOBS=8
 MMCV_WITH_OPS=1 python setup.py bdist_wheel 2>&1 | tee /tmp/mmcv_build.log
 pip install dist/mmcv_full-1.7.2-*.whl
 cd -
@@ -52,30 +58,50 @@ pip install \
     scipy==1.15.3 \
     pandas==2.3.3 \
     shapely==2.1.2 \
+    albumentations==2.0.8 \
+    terminaltables==3.1.10 \
+    matplotlib==3.10.9 \
     openmim
 ```
 
+> `openmim` 的 Python import 名稱是 `mim`（不是 `openmim`）。
+
 ### Step 6：驗證安裝
 
+請先切到專案根目錄：
+
 ```bash
-conda activate mmd
 cd /path/to/HubMap-2023-3rd-Place-Solution
-python -c "
-import warnings; warnings.filterwarnings('ignore')
-import torch, mmcv
-from mmdet.models import build_detector
-print('torch:', torch.__version__, '| CUDA:', torch.cuda.is_available())
-print('mmcv:', mmcv.__version__)
-print('mmdet: OK')
-"
 ```
 
-預期輸出：
+先編譯本地 ops（`train_cps.py` 會用到 `MultiScaleDeformableAttention`）：
+
+```bash
+cd ops
+bash make.sh
+cd ..
 ```
-torch: 2.3.1+cu121 | CUDA: True
-mmcv: 1.7.2
-mmdet: OK
+
+先做核心匯入健檢：
+
+```bash
+python - <<'PY'
+import torch, mmcv, mmdet
+from mmcv.ops import nms, roi_align
+print('torch', torch.__version__, 'cuda', torch.version.cuda, 'is_available', torch.cuda.is_available())
+print('mmcv', mmcv.__version__)
+print('mmdet', mmdet.__version__)
+print('ops_ok', callable(nms), callable(roi_align))
+PY
 ```
+
+再測試腳本可啟動：
+
+```bash
+python train_cps.py --help
+```
+
+若上面兩步都成功，再開始正式訓練。
 
 ---
 
@@ -93,7 +119,7 @@ cd ../..
 **競賽原始資料集**（train/test 影像、標注檔等）
 放到
 ```bash
-hubmap-hacking-the-human-vasculature‵
+hubmap-hacking-the-human-vasculature
 ```
 
 **③ 下載預訓練模型**
