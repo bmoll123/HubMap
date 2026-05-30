@@ -1,6 +1,4 @@
 results/
-hubmap-coco-pretrained-models/
-hubmap-hacking-the-human-vasculature/
 
 *.zip
 
@@ -8,3 +6,5 @@ data/
 reference_module/
 _kaggle/
 log.txt
+data/
+pretrained/

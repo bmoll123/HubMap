@@ -1,6 +1,6 @@
 NUM_CLASSES = 1
 drop_path_rate = 0.3  # 0.4 (pre-train) -> 0.3 (fine-tune)
-pretrained = './hubmap-coco-pretrained-models/htc++_beitv2_adapter_large_fpn_o365_coco.pth'
+pretrained = '.pretrained/pretexp1_adaplargebeitv2l_htc-v2.pth'
 model = dict(
     type='HybridTaskCascade',
     backbone=dict(
@@ -245,13 +245,12 @@ model = dict(
             mask_thr_binary=0.5)))
 
 # optimizer
-data_root = '/home/cvml-3/yy/114_2/HubMap/HubMap-2023-3rd-Place-Solution/hubmap-hacking-the-human-vasculature'
 metainfo = dict(classes=('blood_vessel', ), palette=[(220, 20, 60)])
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 
 # [FIX] img_size 1200 -> 1400，與 Stage 2 一致，避免特徵 scale 不匹配
-img_size = 1400
+img_size = 1024
 
 train_pipeline = [
     dict(type='LoadImageFromFile'),
@@ -265,7 +264,7 @@ train_pipeline = [
     #     ratio_range=(0.8, 1.6),
     #     pad_val=114.0),
     # dict(type='RandomCrop', crop_size=(2048, 2048), cat_max_ratio=0.75),
-    
+
     dict(type='Resize', img_scale=[(img_size, img_size)], keep_ratio=True),
 
     dict(
@@ -278,7 +277,7 @@ train_pipeline = [
             'type': 'Shear',
             'prob': 0.4,
             'level': 0
-        }], 
+        }],
         #           [{
         #     'type': 'Translate',
         #     'prob': 0.4,
@@ -303,24 +302,24 @@ train_pipeline = [
                   #                      (16, 32), (32, 16), (32, 32), (32, 48),
                   #                      (48, 32), (48, 48)]
                   # }],
-                  
+
                   # [
                   #    {
                   #       'type': 'BrightnessTransform',
                   #             'prob': 0.6,
                   #             'level': 4
                   #         }, ],
-                   
-                   
-                   
+
+
+
                   #  [{
                   #     'type': 'ColorTransform',
                   #     'prob': 1.0,
                   #     'level': 6
-                  # }, 
-   
-                   
-                   
+                  # },
+
+
+
                    [{
                       'type': 'EqualizeTransform'
                   }]]),
@@ -377,8 +376,8 @@ test_pipeline = [
             dict(type='Collect', keys=['img'])
         ])
 ]
-# 定義資料根目錄（可視需求改為相對路徑，例如 './hubmap-hacking-the-human-vasculature'）
-data_root = 'hubmap-hacking-the-human-vasculature'
+
+data_root = 'data'
 
 data = dict(
     samples_per_gpu=1,

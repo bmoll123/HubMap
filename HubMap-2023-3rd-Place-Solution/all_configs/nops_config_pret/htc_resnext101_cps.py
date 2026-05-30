@@ -1,6 +1,6 @@
 # htc_resnext101_cps.py
 # ResNeXt-101 DetectoRS HTC — 供 train_cps.py 使用的 CPS 端 config
-# 與 ViT config 保持相同：img_size=1400, 相同 dataset splits, 相同 data_root
+# 與 ViT config 保持相同：img_size=1024, 相同 dataset splits, 相同 data_root
 #
 # 用法：
 #   python train_cps.py \
@@ -246,9 +246,9 @@ model = dict(
             max_per_img=100,
             mask_thr_binary=0.5)))
 
-# ── 資料設定（與 ViT config 保持一致：1400×1400, 相同 fold） ────────────────────
+# ── 資料設定（與 ViT config 保持一致：1024×1024, 相同 fold） ────────────────────
 data_root = 'hubmap-hacking-the-human-vasculature'
-img_size  = 1400
+img_size  = 1024
 
 train_pipeline = [
     dict(type='LoadImageFromFile'),
@@ -357,7 +357,7 @@ lr_config = dict(
     warmup_ratio=0.001,
     min_lr=1e-4)
 
-fp16 = dict(loss_scale=dict(init_scale=512))
+fp16 = None
 
 evaluation   = dict(interval=1, metric=['segm'], save_best='segm_mAP')
 runner       = dict(type='EpochBasedRunner', max_epochs=8)
