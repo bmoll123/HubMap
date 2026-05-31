@@ -38,9 +38,10 @@ import mmdet_custom
 import numpy as np
 import torch
 from mmcv import Config
+from mmcv.parallel import scatter
 from mmcv.runner import build_optimizer, load_checkpoint
 from mmdet.apis import set_random_seed
-from mmdet.core import BitmapMasks
+from mmdet.core import BitmapMasks, encode_mask_results
 from mmdet.datasets import build_dataloader, build_dataset
 from mmdet.models import build_detector
 
@@ -77,6 +78,8 @@ def parse_args():
                    help='從指定 checkpoint 恢復 CNN')
     p.add_argument('--unl-ann-file', default=None,
                    help='unlabeled COCO JSON 路徑（預設使用 ViT config 的 train ann_file）')
+    p.add_argument('--val-only', action='store_true',
+                   help='只跑一次 validation 後結束，不做訓練（需搭配 --ckpt-vit / --ckpt-cnn）')
     return p.parse_args()
 
 
@@ -343,6 +346,71 @@ def _build_iter_lr_scheduler(optimizer, base_lrs, lr_cfg, max_iters: int):
     return _step
 
 
+def _pick_metric(eval_dict: dict, metric: str, iou: str):
+    """Fetch a metric value from MMDet evaluate dict with robust key fallback."""
+    keys = [
+        f'{metric}_mAP_{iou}',
+        f'{metric}_mAP',
+    ]
+    for k in keys:
+        if k in eval_dict:
+            return eval_dict[k]
+    return None
+
+
+def _evaluate_one_model(model, val_loader, device: str, logger: logging.Logger, tag: str):
+    """Run single-model validation and return bbox/segm AP summaries."""
+    dataset = val_loader.dataset
+    results = []
+
+    was_training = model.training
+    model.eval()
+
+    device_id = int(device.split(':')[1])
+
+    with torch.no_grad():
+        for data in val_loader:
+            # scatter moves all DataContainers to the target device properly
+            batch = scatter(data, [device_id])[0]
+            out = model(return_loss=False, **batch)
+            # binary mask → RLE（與 single_gpu_test 相同處理）
+            if isinstance(out[0], tuple):
+                out = [(bbox_r, encode_mask_results(mask_r))
+                       for bbox_r, mask_r in out]
+            results.extend(out)
+
+    # mAP50:95 (COCO default)
+    eval_50_95 = dataset.evaluate(results, metric=['bbox', 'segm'])
+    # mAP50 and mAP60
+    eval_50 = dataset.evaluate(results, metric=['bbox', 'segm'], iou_thrs=np.array([0.5]))
+    eval_60 = dataset.evaluate(results, metric=['bbox', 'segm'], iou_thrs=np.array([0.6]))
+
+    if was_training:
+        model.train()
+
+    bbox_50 = _pick_metric(eval_50, 'bbox', '50')
+    bbox_60 = _pick_metric(eval_60, 'bbox', '60')
+    bbox_50_95 = eval_50_95.get('bbox_mAP')
+
+    segm_50 = _pick_metric(eval_50, 'segm', '50')
+    segm_60 = _pick_metric(eval_60, 'segm', '60')
+    segm_50_95 = eval_50_95.get('segm_mAP')
+
+    logger.info(
+        f'[val][{tag}] vessel bbox mAP50={bbox_50:.4f} mAP60={bbox_60:.4f} mAP50:95={bbox_50_95:.4f} | '
+        f'segm mAP50={segm_50:.4f} mAP60={segm_60:.4f} mAP50:95={segm_50_95:.4f}'
+    )
+
+    return {
+        'bbox_mAP50': bbox_50,
+        'bbox_mAP60': bbox_60,
+        'bbox_mAP50_95': bbox_50_95,
+        'segm_mAP50': segm_50,
+        'segm_mAP60': segm_60,
+        'segm_mAP50_95': segm_50_95,
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 主訓練迴圈
 # ─────────────────────────────────────────────────────────────────────────────
@@ -374,14 +442,18 @@ def main():
                                train_cfg=cfg_cnn.get('train_cfg'),
                                test_cfg=cfg_cnn.get('test_cfg'))
 
-    if args.ckpt_vit:
-        load_checkpoint(model_vit, args.ckpt_vit, map_location='cpu',
+    # --ckpt-* 優先；resume 時跳過 load_from（weights 會由 resume 載入）；
+    # 全新訓練且未指定 --ckpt-* 時，才退回 config 的 load_from
+    ckpt_vit = args.ckpt_vit or (None if args.resume_vit else cfg_vit.get('load_from'))
+    ckpt_cnn = args.ckpt_cnn or (None if args.resume_cnn else cfg_cnn.get('load_from'))
+    if ckpt_vit:
+        load_checkpoint(model_vit, ckpt_vit, map_location='cpu',
                         revise_keys=[(r'^module\.', '')])
-        logger.info(f'[init] ViT 載入 {args.ckpt_vit}')
-    if args.ckpt_cnn:
-        load_checkpoint(model_cnn, args.ckpt_cnn, map_location='cpu',
+        logger.info(f'[init] ViT 載入 {ckpt_vit}')
+    if ckpt_cnn:
+        load_checkpoint(model_cnn, ckpt_cnn, map_location='cpu',
                         revise_keys=[(r'^module\.', '')])
-        logger.info(f'[init] CNN 載入 {args.ckpt_cnn}')
+        logger.info(f'[init] CNN 載入 {ckpt_cnn}')
 
     # AMP（與原始 config 的 fp16 開關對齊）
     use_amp_vit = cfg_vit.get('fp16') is not None
@@ -413,6 +485,17 @@ def main():
         dist=False,
         shuffle=True,
         drop_last=True,
+    )
+
+    # val set（每個 epoch 後評估 ViT / CNN）
+    val_dataset = build_dataset(cfg_vit.data.val)
+    val_loader = build_dataloader(
+        val_dataset,
+        samples_per_gpu=1,
+        workers_per_gpu=cfg_vit.data.workers_per_gpu,
+        dist=False,
+        shuffle=False,
+        drop_last=False,
     )
 
     # ── 建立 LR scheduler（iter-based）────────────────────────────────────────
@@ -485,6 +568,14 @@ def main():
             start_epoch = min(int(resume_epoch_vit), int(resume_epoch_cnn))
 
         logger.info(f'[resume] 共同起始 epoch = {start_epoch}, iter = {total_iters}')
+
+    # ── val-only 模式：跑完驗證就結束 ──────────────────────────────────────────
+    if args.val_only:
+        logger.info('[val-only] 開始驗證，不執行訓練')
+        _evaluate_one_model(model_vit, val_loader, 'cuda:0', logger, tag='ViT')
+        _evaluate_one_model(model_cnn, val_loader, 'cuda:1', logger, tag='CNN')
+        logger.info('[val-only] 完成')
+        return
 
     # ── 訓練主迴圈 ────────────────────────────────────────────────────────────
     best_metric = 0.0   # 留給未來整合 evaluation hook
@@ -661,6 +752,10 @@ def main():
                       os.path.join(args.work_dir, f'cnn_epoch_{epoch+1}.pth'),
                       meta)
             logger.info(f'[ckpt] saved epoch {epoch+1}')
+
+            # ── 每個 epoch 做 validation（vessel bbox/segm mAP50, mAP60, mAP50:95） ──
+            _evaluate_one_model(model_vit, val_loader, 'cuda:0', logger, tag='ViT')
+            _evaluate_one_model(model_cnn, val_loader, 'cuda:1', logger, tag='CNN')
 
     logger.info('[done] CPS 訓練完成')
 
