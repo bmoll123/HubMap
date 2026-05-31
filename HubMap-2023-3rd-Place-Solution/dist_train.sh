@@ -3,15 +3,44 @@
 # 設定環境變數
 export PYTHONPATH="$(cd "$(dirname "$0")" && pwd)/..":$PYTHONPATH
 
-# 設定 GPU ID（方便管理）
-GPU_ID=0
+# ════════════════════════════════════════════════════════
+# 實驗 A（GPU 2+3）：原始 CPS — ViT + ResNeXt-101 (RFP)
+#   CNN 使用正確的 pretwsiall-next101htc.pth
+# ════════════════════════════════════════════════════════
+CUDA_VISIBLE_DEVICES=2,3 python train_cps.py \
+  --cfg-vit all_configs/pretconf/pretexp1_adaplargebeitv2l_htc-v2.py \
+  --cfg-cnn all_configs/nops_config_pret/htc_resnext101_cps.py \
+  --ckpt-cnn pretrained/pretwsiall-next101htc.pth \
+  --ckpt-vit pretrained/pretexp1_adaplargebeitv2l_htc-v2.pth \
+  --work-dir results/cps/stage1
+
+CUDA_VISIBLE_DEVICES=2,3 python train_cps.py \
+  --cfg-vit all_configs/pretconf/pretexp1_adaplargebeitv2l_htc-v2.py \
+  --cfg-cnn all_configs/nops_config_pret/htc_resnext101_cps.py \
+  --resume-vit results/cps/stage1/vit_epoch_1.pth \
+  --resume-cnn results/cps/stage1/cnn_epoch_1.pth \
+  --work-dir results/cps/stage1_resume
+
+# ════════════════════════════════════════════════════════
+# 實驗 B（GPU 0+1）：LNN CPS — ViT(LNNHopfieldFPN) + ResNet-50(LNNHopfieldFPN)
+#   CNN 換成較小的 ResNet-50，neck 同樣使用 LNNHopfieldFPN
+#   預計 VRAM：ViT ~20GB / R50+LNN ~6-8GB（各自 GPU 均可容納）
+# ════════════════════════════════════════════════════════
+CUDA_VISIBLE_DEVICES=0,1 python train_cps3.py \
+  --cfg-vit  all_configs/pretconf/pretexp1_adaplargebeitv2l_htc-v2_lnnfpn.py \
+  --cfg-cnn1 all_configs/nops_config_pret/htc_resnext101_cps.py \
+  --cfg-cnn2 all_configs/nops_config_pret/htc_r50_lnnfpn_cps.py \
+  --ckpt-vit  pretrained/pretexp1_adaplargebeitv2l_htc-v2.pth \
+  --ckpt-cnn1 pretrained/pretwsiall-next101htc.pth \
+  --ckpt-cnn2 pretrained/ds1pretexp1moreaug-htc50.pth \
+  --work-dir  results/cps3/stage1
 
 # 定義你的訓練指令（已修正末尾換行）
 CMD1="python train_cps.py \
   --cfg-vit all_configs/pretconf/pretexp1_adaplargebeitv2l_htc-v2.py \
   --cfg-cnn all_configs/nops_config_pret/htc_resnext101_cps.py \
-  --ckpt-vit results/stage1/best_segm_mAP_epoch_8.pth \
-  --ckpt-cnn hubmap-coco-pretrained-models/detec_htcres101x32_pretcoco.pth \
+  --ckpt-vit pretrained/pretexp1_adaplargebeitv2l_htc-v2.pth \
+  --ckpt-cnn pretrained/pretwsiall-next101htc-exp1-augv4-cv409-best-segm.QHhIJOoW.pth.part \
   --work-dir results/cps/stage1"
 
 CMD2="python train_cps.py \

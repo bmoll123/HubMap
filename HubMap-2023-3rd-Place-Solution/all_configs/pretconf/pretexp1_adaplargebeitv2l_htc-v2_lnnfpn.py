@@ -1,57 +1,57 @@
-# htc_resnext101_cps.py
-# ResNeXt-101 DetectoRS HTC — 供 train_cps.py 使用的 CPS 端 config
-# 與 ViT config 保持相同：img_size=1024, 相同 dataset splits, 相同 data_root
-#
-# 用法：
-#   python train_cps.py \
-#     --cfg-vit all_configs/pretconf/pretexp1_adaplargebeitv2l_htc-v2.py \
-#     --cfg-cnn all_configs/nops_config_pret/htc_resnext101_cps.py \
-#     --ckpt-vit results/stage1/best_segm_mAP_epoch_8.pth \
-#     --ckpt-cnn hubmap-coco-pretrained-models/detec_htcres101x32_pretcoco.pth \
-#     --work-dir results/cps/stage1
-
 NUM_CLASSES = 1
-
+drop_path_rate = 0.3  # 0.4 (pre-train) -> 0.3 (fine-tune)
+pretrained = '.pretrained/pretexp1_adaplargebeitv2l_htc-v2.pth'
 model = dict(
     type='HybridTaskCascade',
     backbone=dict(
-        type='DetectoRS_ResNeXt',
-        depth=101,
-        num_stages=4,
-        groups=32,
-        base_width=4,
-        out_indices=(0, 1, 2, 3),
-        frozen_stages=1,
-        norm_cfg=dict(type='BN', requires_grad=True),
-        norm_eval=True,
-        style='pytorch',
-        conv_cfg=dict(type='ConvAWS'),
-        sac=dict(type='SAC', use_deform=True),
-        stage_with_sac=(False, True, True, True),
-        output_img=True),
-    neck=dict(
-        type='RFP',
-        rfp_steps=2,
-        aspp_out_channels=64,
-        aspp_dilations=(1, 3, 6, 1),
-        in_channels=[256, 512, 1024, 2048],
-        out_channels=256,
-        num_outs=5,
-        rfp_backbone=dict(
-            rfp_inplanes=256,
-            type='DetectoRS_ResNeXt',
-            depth=101,
-            groups=32,
-            base_width=4,
-            num_stages=4,
-            out_indices=(0, 1, 2, 3),
-            frozen_stages=1,
-            norm_cfg=dict(type='BN', requires_grad=True),
-            norm_eval=True,
-            conv_cfg=dict(type='ConvAWS'),
-            sac=dict(type='SAC', use_deform=True),
-            stage_with_sac=(False, True, True, True),
-            style='pytorch')),
+        type='BEiTAdapter',
+        img_size=224,
+        patch_size=16,
+        embed_dim=1024,
+        depth=24,
+        num_heads=16,
+        mlp_ratio=4,
+        qkv_bias=True,
+        use_abs_pos_emb=False,
+        use_rel_pos_bias=True,
+        init_values=1e-6,
+        drop_path_rate=drop_path_rate,
+        conv_inplane=64,
+        n_points=4,
+        deform_num_heads=16,
+        cffn_ratio=0.25,
+        deform_ratio=0.5,
+        with_cp=True,
+        window_attn=[True, True, True, True, True, True,
+                     True, True, True, True, True, True,
+                     True, True, True, True, True, True,
+                     True, True, True, True, True, True],
+        window_size=[14, 14, 14, 14, 14, 56,
+                     14, 14, 14, 14, 14, 56,
+                     14, 14, 14, 14, 14, 56,
+                     14, 14, 14, 14, 14, 56],
+        interaction_indexes=[[0, 5], [6, 11], [12, 17], [18, 23]],
+        pretrained=None),
+    neck=[
+        dict(
+            type='ExtraAttention',
+            in_channels=[1024, 1024, 1024, 1024],
+            num_head=32,
+            with_ffn=True,
+            with_cp=True,
+            ffn_ratio=4.0,
+            drop_path=drop_path_rate,
+        ),
+        dict(
+            type='LNNHopfieldFPN',
+            in_channels=[1024, 1024, 1024, 1024],
+            norm_cfg=dict(type='GN', num_groups=32),
+            out_channels=256,
+            num_outs=5,
+            num_prototypes=128,
+            hopfield_beta=1.0,
+            cfc_hidden_ratio=1.0,
+        )],
     rpn_head=dict(
         type='RPNHead',
         in_channels=256,
@@ -63,12 +63,11 @@ model = dict(
             strides=[4, 8, 16, 32, 64]),
         bbox_coder=dict(
             type='DeltaXYWHBBoxCoder',
-            target_means=[0.0, 0.0, 0.0, 0.0],
+            target_means=[.0, .0, .0, .0],
             target_stds=[1.0, 1.0, 1.0, 1.0]),
         loss_cls=dict(
             type='CrossEntropyLoss', use_sigmoid=True, loss_weight=1.0),
-        loss_bbox=dict(
-            type='SmoothL1Loss', beta=0.1111111111111111, loss_weight=1.0)),
+        loss_bbox=dict(type='SmoothL1Loss', beta=1.0 / 9.0, loss_weight=1.0)),
     roi_head=dict(
         type='HybridTaskCascadeRoIHead',
         interleaved=True,
@@ -82,53 +81,53 @@ model = dict(
             featmap_strides=[4, 8, 16, 32]),
         bbox_head=[
             dict(
-                type='Shared2FCBBoxHead',
+                type='Shared4Conv1FCBBoxHead',
                 in_channels=256,
                 fc_out_channels=1024,
                 roi_feat_size=7,
                 num_classes=NUM_CLASSES,
                 bbox_coder=dict(
                     type='DeltaXYWHBBoxCoder',
-                    target_means=[0.0, 0.0, 0.0, 0.0],
+                    target_means=[0., 0., 0., 0.],
                     target_stds=[0.1, 0.1, 0.2, 0.2]),
                 reg_class_agnostic=True,
+                reg_decoded_bbox=True,
+                norm_cfg=dict(type='GN', num_groups=32, requires_grad=True),
                 loss_cls=dict(
-                    type='CrossEntropyLoss',
-                    use_sigmoid=False,
-                    loss_weight=1.0),
-                loss_bbox=dict(type='SmoothL1Loss', beta=1, loss_weight=1.0)),
+                    type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0),
+                loss_bbox=dict(type='GIoULoss', loss_weight=10.0)),
             dict(
-                type='Shared2FCBBoxHead',
+                type='Shared4Conv1FCBBoxHead',
                 in_channels=256,
                 fc_out_channels=1024,
                 roi_feat_size=7,
                 num_classes=NUM_CLASSES,
                 bbox_coder=dict(
                     type='DeltaXYWHBBoxCoder',
-                    target_means=[0.0, 0.0, 0.0, 0.0],
+                    target_means=[0., 0., 0., 0.],
                     target_stds=[0.05, 0.05, 0.1, 0.1]),
                 reg_class_agnostic=True,
+                reg_decoded_bbox=True,
+                norm_cfg=dict(type='GN', num_groups=32, requires_grad=True),
                 loss_cls=dict(
-                    type='CrossEntropyLoss',
-                    use_sigmoid=False,
-                    loss_weight=1.0),
-                loss_bbox=dict(type='SmoothL1Loss', beta=1, loss_weight=1.0)),
+                    type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0),
+                loss_bbox=dict(type='GIoULoss', loss_weight=10.0)),
             dict(
-                type='Shared2FCBBoxHead',
+                type='Shared4Conv1FCBBoxHead',
                 in_channels=256,
                 fc_out_channels=1024,
                 roi_feat_size=7,
                 num_classes=NUM_CLASSES,
                 bbox_coder=dict(
                     type='DeltaXYWHBBoxCoder',
-                    target_means=[0.0, 0.0, 0.0, 0.0],
+                    target_means=[0., 0., 0., 0.],
                     target_stds=[0.033, 0.033, 0.067, 0.067]),
                 reg_class_agnostic=True,
+                reg_decoded_bbox=True,
+                norm_cfg=dict(type='GN', num_groups=32, requires_grad=True),
                 loss_cls=dict(
-                    type='CrossEntropyLoss',
-                    use_sigmoid=False,
-                    loss_weight=1.0),
-                loss_bbox=dict(type='SmoothL1Loss', beta=1, loss_weight=1.0)),
+                    type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0),
+                loss_bbox=dict(type='GIoULoss', loss_weight=10.0)),
         ],
         mask_roi_extractor=dict(
             type='SingleRoIExtractor',
@@ -142,7 +141,7 @@ model = dict(
                 num_convs=4,
                 in_channels=256,
                 conv_out_channels=256,
-                num_classes=NUM_CLASSES,
+                num_classes=1,
                 loss_mask=dict(
                     type='CrossEntropyLoss', use_mask=True, loss_weight=1.0)),
             dict(
@@ -150,7 +149,7 @@ model = dict(
                 num_convs=4,
                 in_channels=256,
                 conv_out_channels=256,
-                num_classes=NUM_CLASSES,
+                num_classes=1,
                 loss_mask=dict(
                     type='CrossEntropyLoss', use_mask=True, loss_weight=1.0)),
             dict(
@@ -158,10 +157,11 @@ model = dict(
                 num_convs=4,
                 in_channels=256,
                 conv_out_channels=256,
-                num_classes=NUM_CLASSES,
+                num_classes=1,
                 loss_mask=dict(
-                    type='CrossEntropyLoss', use_mask=True, loss_weight=1.0)),
-        ]),
+                    type='CrossEntropyLoss', use_mask=True, loss_weight=1.0))
+        ],
+    ),
     train_cfg=dict(
         rpn=dict(
             assigner=dict(
@@ -232,7 +232,7 @@ model = dict(
                     add_gt_as_proposals=True),
                 mask_size=28,
                 pos_weight=-1,
-                debug=False),
+                debug=False)
         ]),
     test_cfg=dict(
         rpn=dict(
@@ -242,18 +242,35 @@ model = dict(
             min_bbox_size=0),
         rcnn=dict(
             score_thr=0.001,
-            nms=dict(type='nms', iou_threshold=0.5),
-            max_per_img=100,
+            # [FIX] soft_nms iou_threshold 0.5 -> 0.4，降低對密集血管的壓制
+            nms=dict(type='soft_nms', iou_threshold=0.5),
+            # [FIX] max_per_img 100 -> 200，避免 dense tile 截斷
+            max_per_img=200,
             mask_thr_binary=0.5)))
 
-# ── 資料設定（與 ViT config 保持一致：1024×1024, 相同 fold） ────────────────────
-data_root = 'hubmap-hacking-the-human-vasculature'
-img_size  = 1024
+# optimizer
+metainfo = dict(classes=('blood_vessel', ), palette=[(220, 20, 60)])
+img_norm_cfg = dict(
+    mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
+
+# [FIX] img_size 1200 -> 1400，與 Stage 2 一致，避免特徵 scale 不匹配
+img_size = 1024
 
 train_pipeline = [
     dict(type='LoadImageFromFile'),
     dict(type='LoadAnnotations', with_bbox=True, with_mask=True),
+
+    # dict(type='Mosaic', img_scale=(img_size, img_size), pad_val=114.0),
+
+    # dict(
+    #     type='MixUp',
+    #     img_scale=(img_size, img_size),
+    #     ratio_range=(0.8, 1.6),
+    #     pad_val=114.0),
+    # dict(type='RandomCrop', crop_size=(2048, 2048), cat_max_ratio=0.75),
+
     dict(type='Resize', img_scale=[(img_size, img_size)], keep_ratio=True),
+
     dict(
         type='RandomFlip',
         direction=['horizontal', 'vertical'],
@@ -265,7 +282,49 @@ train_pipeline = [
             'prob': 0.4,
             'level': 0
         }],
-                  [{
+        #           [{
+        #     'type': 'Translate',
+        #     'prob': 0.4,
+        #     'level': 5
+        # }],
+                # [{
+                #       'type': 'PhotoMetricDistortion',
+                #       'brightness_delta': 32,
+                #       'contrast_range': (0.5, 1.5),
+                #       'hue_delta': 18
+                #   }],
+                  # [{
+                  #     'type': 'MinIoURandomCrop',
+                  #     'min_ious': (0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
+                  #     'min_crop_size': 0.3
+                  # }],
+                  # [{
+                  #     'type':
+                  #     'CutOut',
+                  #     'n_holes': (5, 10),
+                  #     'cutout_shape': [(4, 4), (4, 8), (8, 4), (8, 8),
+                  #                      (16, 32), (32, 16), (32, 32), (32, 48),
+                  #                      (48, 32), (48, 48)]
+                  # }],
+
+                  # [
+                  #    {
+                  #       'type': 'BrightnessTransform',
+                  #             'prob': 0.6,
+                  #             'level': 4
+                  #         }, ],
+
+
+
+                  #  [{
+                  #     'type': 'ColorTransform',
+                  #     'prob': 1.0,
+                  #     'level': 6
+                  # },
+
+
+
+                   [{
                       'type': 'EqualizeTransform'
                   }]]),
     dict(
@@ -277,6 +336,11 @@ train_pipeline = [
                 scale_limit=0.15,
                 rotate_limit=15,
                 p=0.4),
+            # dict(type='RandomRotate90', p=0.4),
+            # dict(type='RandomGamma',p=0.1),
+            # dict(type='CLAHE',p=0.1)
+
+
         ],
         bbox_params=dict(
             type='BboxParams',
@@ -294,9 +358,8 @@ train_pipeline = [
         to_rgb=True),
     dict(type='Pad', size_divisor=32),
     dict(type='DefaultFormatBundle'),
-    dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_labels', 'gt_masks']),
+    dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_labels', 'gt_masks'])
 ]
-
 test_pipeline = [
     dict(type='LoadImageFromFile'),
     dict(
@@ -314,62 +377,69 @@ test_pipeline = [
                 to_rgb=True),
             dict(type='Pad', size_divisor=32),
             dict(type='ImageToTensor', keys=['img']),
-            dict(type='Collect', keys=['img']),
-        ]),
+            dict(type='Collect', keys=['img'])
+        ])
 ]
+
+data_root = 'data'
 
 data = dict(
     samples_per_gpu=1,
     workers_per_gpu=2,
     pin_memory=True,
-    drop_last=True,
+    drop_last=False,
     train=dict(
         type='CocoDataset',
-        data_root=data_root,
-        classes=('blood_vessels',),
-        ann_file='coco_data/coco/ds2wsiall_coco_1024_train_fold1.json',
-        img_prefix='train/',
+        data_root=data_root,  # 加入 data_root
+        classes=('blood_vessels', ),
+        ann_file='coco_data/coco/ds2wsiall_coco_1024_train_fold1.json',  # 改為相對路徑
+        img_prefix='train/',  # 改為相對路徑
         pipeline=train_pipeline),
     val=dict(
         type='CocoDataset',
-        data_root=data_root,
-        classes=('blood_vessels',),
-        ann_file='coco_data/coco/ds1_coco_1024_valid_all_fold1.json',
-        img_prefix='train/',
+        data_root=data_root,  # 加入 data_root
+        classes=('blood_vessels', ),
+        ann_file='coco_data/coco/ds1_coco_1024_valid_all_fold1.json',  # 改為相對路徑
+        img_prefix='train/',  # 改為相對路徑
         pipeline=test_pipeline),
     test=dict(
         type='CocoDataset',
-        data_root=data_root,
-        classes=('blood_vessels',),
-        ann_file='coco_data/coco/ds12_coco_1024_valid_all_fold1.json',
-        img_prefix='train/',
-        pipeline=test_pipeline),
+        data_root=data_root,  # 加入 data_root
+        classes=('blood_vessels', ),
+        ann_file='coco_data/coco/ds12_coco_1024_valid_all_fold1.json',  # 改為相對路徑
+        img_prefix='train/',  # 改為相對路徑
+        pipeline=test_pipeline))
+
+# [FIX] lr 0.03 -> 0.02，配合真正退火到 1e-4
+optimizer = dict(type='SGD', lr=0.02, momentum=0.9, weight_decay=0.0001)
+optimizer_config = dict(
+    type='GradientCumulativeOptimizerHook',
+    cumulative_iters=6,
+    grad_clip=dict(max_norm=35, norm_type=2)
 )
-
-optimizer = dict(type='SGD', lr=0.002, momentum=0.9, weight_decay=0.0001)
-optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
-
 lr_config = dict(
     policy='CosineAnnealing',
     by_epoch=False,
     warmup='linear',
     warmup_iters=250,
     warmup_ratio=0.001,
+    # [FIXED BUG] 依據您的註解，將 min_lr 從 0.02 改為 1e-4，確保 CosineAnnealing 能正常退火
     min_lr=1e-4)
 
+evaluation = dict(interval=1, metric=['segm'], save_best='segm_mAP')
+runner = dict(type='EpochBasedRunner', max_epochs=8)
+checkpoint_config = dict(interval=-1, filename_tmpl='detectors_epoch_{}.pth')
+log_config = dict(interval=20, hooks=[dict(type='TextLoggerHook')])
 fp16 = None
+gpu_ids = range(0, 1)
+seed = 69
+dist_params = dict(backend='nccl')
+log_level = 'INFO'
 
-evaluation   = dict(interval=1, metric=['segm'], save_best='segm_mAP')
-runner       = dict(type='EpochBasedRunner', max_epochs=8)
-checkpoint_config = dict(interval=-1, filename_tmpl='cnn_epoch_{}.pth')
-log_config   = dict(interval=20, hooks=[dict(type='TextLoggerHook')])
-gpu_ids      = [1]
-seed         = 69
-dist_params  = dict(backend='nccl')
-log_level    = 'INFO'
-load_from    = 'hubmap-coco-pretrained-models/detec_htcres101x32_pretcoco.pth'
-work_dir     = './results/cps/stage1'
-workflow     = [('train', 1)]
-auto_resume  = False
-resume_from  = None
-launcher     = 'none'
+# 預訓練權重路徑（建議將模型放入專案目錄下，即可改為 './hubmap-coco-pretrained-models/...'）
+load_from = 'hubmap-coco-pretrained-models/htc++_beitv2_adapter_large_fpn_o365_coco.pth'
+work_dir = './results/stage1'
+workflow = [('train', 1)]
+auto_resume = False
+resume_from = None
+launcher = 'none'

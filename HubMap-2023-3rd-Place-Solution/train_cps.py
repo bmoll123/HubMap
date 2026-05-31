@@ -388,13 +388,13 @@ def _evaluate_one_model(model, val_loader, device: str, logger: logging.Logger, 
     if was_training:
         model.train()
 
-    bbox_50 = _pick_metric(eval_50, 'bbox', '50')
-    bbox_60 = _pick_metric(eval_60, 'bbox', '60')
-    bbox_50_95 = eval_50_95.get('bbox_mAP')
+    bbox_50 = _pick_metric(eval_50, 'bbox', '50') or 0.0
+    bbox_60 = _pick_metric(eval_60, 'bbox', '60') or 0.0
+    bbox_50_95 = eval_50_95.get('bbox_mAP') or 0.0
 
-    segm_50 = _pick_metric(eval_50, 'segm', '50')
-    segm_60 = _pick_metric(eval_60, 'segm', '60')
-    segm_50_95 = eval_50_95.get('segm_mAP')
+    segm_50 = _pick_metric(eval_50, 'segm', '50') or 0.0
+    segm_60 = _pick_metric(eval_60, 'segm', '60') or 0.0
+    segm_50_95 = eval_50_95.get('segm_mAP') or 0.0
 
     logger.info(
         f'[val][{tag}] vessel bbox mAP50={bbox_50:.4f} mAP60={bbox_60:.4f} mAP50:95={bbox_50_95:.4f} | '
@@ -641,6 +641,7 @@ def main():
                         rescale=False,   # 保持 img_shape 座標系
                     )
                 model_cnn.train()
+                torch.cuda.empty_cache()  # 釋放 CNN inference 的 cuda:1 cache
 
                 pb, pl, pm = inference_to_pseudo_gt(
                     result_cnn[0], metas_unl, PSEUDO_CONF_THR, 'cuda:0')
@@ -696,6 +697,7 @@ def main():
                         rescale=False,
                     )
                 model_vit.train()
+                torch.cuda.empty_cache()  # 釋放 ViT inference 的 cuda:0 cache
 
                 pb, pl, pm = inference_to_pseudo_gt(
                     result_vit[0], metas_unl, PSEUDO_CONF_THR, 'cuda:1')
@@ -717,11 +719,16 @@ def main():
                 loss_cnn_cps = torch.tensor(0.0, device='cuda:1')
 
             loss_cnn_total = loss_cnn_sup + lam * loss_cnn_cps
-            scaler_cnn.scale(loss_cnn_total).backward()
-            scaler_cnn.unscale_(opt_cnn)
-            torch.nn.utils.clip_grad_norm_(model_cnn.parameters(), GRAD_CLIP_NORM)
-            scaler_cnn.step(opt_cnn)
-            scaler_cnn.update()
+            if torch.isfinite(loss_cnn_total):
+                scaler_cnn.scale(loss_cnn_total).backward()
+                scaler_cnn.unscale_(opt_cnn)
+                torch.nn.utils.clip_grad_norm_(model_cnn.parameters(), GRAD_CLIP_NORM)
+                scaler_cnn.step(opt_cnn)
+                scaler_cnn.update()
+            else:
+                logger.warning(f'[CNN] NaN/Inf loss at iter {i+1}, skip optimizer step')
+                opt_cnn.zero_grad(set_to_none=True)
+                scaler_cnn.update()
 
             total_iters += 1
 

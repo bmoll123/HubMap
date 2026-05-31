@@ -8,3 +8,9 @@ _kaggle/
 log.txt
 data/
 pretrained/
+results/
+chat.json
+*.out
+*.tex
+*.docx
+*.pdf

@@ -1,57 +1,39 @@
-# htc_resnext101_cps.py
-# ResNeXt-101 DetectoRS HTC — 供 train_cps.py 使用的 CPS 端 config
-# 與 ViT config 保持相同：img_size=1024, 相同 dataset splits, 相同 data_root
+# htc_r50_lnnfpn_cps.py
+# ResNet-50 + LNNHopfieldFPN HTC — 供 train_cps.py 使用的 CPS CNN 端 config
 #
+# 與 htc_resnext101_cps.py 的差異：
+#   backbone : DetectoRS_ResNeXt-101-32x4d (重) → ResNet-50 (輕, 標準卷積)
+#   neck     : RFP (遞歸特徵金字塔, 含 rfp_backbone) → LNNHopfieldFPN
+#   load_from: COCO 預訓練 HTC-R50 (mmdet model zoo)
+#
+# 預計 VRAM: ~6-8 GB (1024px) vs ResNeXt-101+RFP 的 ~15-20 GB
 # 用法：
 #   python train_cps.py \
-#     --cfg-vit all_configs/pretconf/pretexp1_adaplargebeitv2l_htc-v2.py \
-#     --cfg-cnn all_configs/nops_config_pret/htc_resnext101_cps.py \
-#     --ckpt-vit results/stage1/best_segm_mAP_epoch_8.pth \
-#     --ckpt-cnn hubmap-coco-pretrained-models/detec_htcres101x32_pretcoco.pth \
-#     --work-dir results/cps/stage1
+#     --cfg-vit all_configs/pretconf/pretexp1_adaplargebeitv2l_htc-v2_lnnfpn.py \
+#     --cfg-cnn all_configs/nops_config_pret/htc_r50_lnnfpn_cps.py \
+#     --work-dir results/cps/stage1_lnn
 
 NUM_CLASSES = 1
 
 model = dict(
     type='HybridTaskCascade',
     backbone=dict(
-        type='DetectoRS_ResNeXt',
-        depth=101,
+        type='ResNet',
+        depth=50,
         num_stages=4,
-        groups=32,
-        base_width=4,
         out_indices=(0, 1, 2, 3),
         frozen_stages=1,
         norm_cfg=dict(type='BN', requires_grad=True),
         norm_eval=True,
-        style='pytorch',
-        conv_cfg=dict(type='ConvAWS'),
-        sac=dict(type='SAC', use_deform=True),
-        stage_with_sac=(False, True, True, True),
-        output_img=True),
+        style='pytorch'),
     neck=dict(
-        type='RFP',
-        rfp_steps=2,
-        aspp_out_channels=64,
-        aspp_dilations=(1, 3, 6, 1),
+        type='LNNHopfieldFPN',
         in_channels=[256, 512, 1024, 2048],
         out_channels=256,
         num_outs=5,
-        rfp_backbone=dict(
-            rfp_inplanes=256,
-            type='DetectoRS_ResNeXt',
-            depth=101,
-            groups=32,
-            base_width=4,
-            num_stages=4,
-            out_indices=(0, 1, 2, 3),
-            frozen_stages=1,
-            norm_cfg=dict(type='BN', requires_grad=True),
-            norm_eval=True,
-            conv_cfg=dict(type='ConvAWS'),
-            sac=dict(type='SAC', use_deform=True),
-            stage_with_sac=(False, True, True, True),
-            style='pytorch')),
+        num_prototypes=128,
+        hopfield_beta=1.0,
+        cfc_hidden_ratio=1.0),
     rpn_head=dict(
         type='RPNHead',
         in_channels=256,
@@ -346,7 +328,7 @@ data = dict(
         pipeline=test_pipeline),
 )
 
-optimizer = dict(type='SGD', lr=0.002, momentum=0.9, weight_decay=0.0001)
+optimizer = dict(type='SGD', lr=0.01, momentum=0.9, weight_decay=0.0001)
 optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 
 lr_config = dict(
@@ -367,8 +349,9 @@ gpu_ids      = [1]
 seed         = 69
 dist_params  = dict(backend='nccl')
 log_level    = 'INFO'
-load_from    = 'hubmap-coco-pretrained-models/detec_htcres101x32_pretcoco.pth'
-work_dir     = './results/cps/stage1'
+# COCO 預訓練 HTC-R50（mmdet model zoo，訓練時自動下載）
+load_from    = 'https://download.openmmlab.com/mmdetection/v2.0/htc/htc_r50_fpn_1x_coco/htc_r50_fpn_1x_coco_20200317-7332888a.pth'
+work_dir     = './results/cps/stage1_lnn'
 workflow     = [('train', 1)]
 auto_resume  = False
 resume_from  = None
